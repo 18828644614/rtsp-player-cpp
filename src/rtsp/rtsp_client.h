@@ -1,0 +1,83 @@
+#pragma once
+
+#include "net/tcp_socket.h"
+#include "rtp/packet_stats.h"
+#include "rtsp/rtsp_stream_parser.h"
+#include "rtsp/sdp.h"
+
+#include <chrono>
+#include <functional>
+#include <optional>
+#include <ostream>
+#include <vector>
+
+namespace rtsp {
+
+struct ClientOptions {
+    int timeout_ms = 3000;
+    int seconds = 0;  // 从 PLAY 成功开始计时；0 为持续接收。
+};
+
+struct TrackState {
+    MediaTrack media;
+    std::string url;
+    TcpTransport channels;
+    bool setup = false;
+    PacketStats stats;
+};
+
+// 单线程、一次会话、每次只等待一个 RTSP 响应。
+class RtspClient {
+public:
+    RtspClient(
+        ClientOptions options, std::ostream& output, std::function<bool()> stop_requested = {}
+    );
+
+    // 它从一个 RTSP URL 开始，依次完成连接、协商双轨、开始接收，最后负责结束会话和清理资源
+    void run(const std::string& url);
+
+    const std::vector<TrackState>& tracks() const {
+        return tracks_;
+    }
+
+private:
+    using Clock = std::chrono::steady_clock;
+
+    RtspMessage request_and_wait(
+        const std::string& method,
+        const std::string& url,
+        const std::vector<RtspHeader>& headers = {},
+        bool stopping = false
+    );
+    std::optional<RtspMessage> receive_and_dispatch(int timeout_ms);
+    void dispatch_media(const RtspStreamItem& item);
+    void describe();
+    void setup_track(TrackState& track, int first_channel);
+    void receive_loop();
+    void teardown();
+    void print_stats(const char* label);
+    bool should_stop() const;
+    void check_endpoint(const std::string& url) const;
+
+    ClientOptions options_;
+    std::ostream& out_;
+    std::function<bool()> stop_requested_;
+
+    TcpSocket socket_;
+    RtspStreamParser parser_;
+
+    std::string input_url_;
+    std::string aggregate_url_;
+    std::string session_;
+    RtspUrl endpoint_;
+    int cseq_ = 0;
+    unsigned int session_timeout_seconds_ = 60;
+    std::vector<TrackState> tracks_;
+
+    Clock::time_point next_print_;
+    Clock::time_point next_keepalive_;
+    std::optional<Clock::time_point> play_started_;
+    std::uint64_t unknown_channels_ = 0;
+};
+
+}  // namespace rtsp

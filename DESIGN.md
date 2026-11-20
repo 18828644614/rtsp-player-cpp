@@ -20,7 +20,7 @@ TCP → 字节流拆分 ─┼─→ RTP 视频  ─→ H.264 AU ─→ 解码 �
 
 ## 模块与依赖
 
-目录按阶段引入，不先创建一排空类。当前实际只有 src/main.cpp；其余目录是设计位置。
+目录按阶段引入，不先创建一排空类。P1 已实现 src/net/、src/rtsp/、src/rtp/；src/media/ 和 src/player/ 留到后续阶段。
 
 | 位置 | 职责 |
 | --- | --- |
@@ -71,3 +71,16 @@ P1/P2 可用单线程验证。接窗口后，主线程处理 SDL3 事件和渲�
 | P5 同步 | RTCP SR + 音频时钟 + 视频等帧/丢帧 | 模拟两轨起始相差 120 ms 且 RTP 回绕，仍得到正确的相对时间；用拍手或可控同步信号检查实际播放。 |
 
 从 P1 开始，可以用服务端现有的 camera_rtsp_tests.exe --serve 提供短时双轨测试流，不需要摄像头或麦克风；启动后用它打印的 URL。保活测试另用可控超时的回环假服务器。最终接真实双设备，并以 ffplay 作为对照以区分服务端问题和播放器问题。
+
+## P1 实际落地（2026-11-20）
+
+- 三个主要类：`TcpSocket`、`RtspStreamParser`、`RtspClient`；其他协议解析和统计使用普通函数与结构体。
+- `RtspClient::run()` 顺序执行 OPTIONS、DESCRIBE、两次 SETUP、PLAY 和接收循环。
+- `request_and_wait()` 与接收循环都调用 `receive_and_dispatch()`；等待控制回复时继续统计交织媒体。
+- SDP、Transport、Session 和控制 URL 的纯解析集中在 `src/rtsp/sdp.h/.cpp`。
+- RTP/RTCP 头校验、复合 RTCP 遍历及统计集中在 `src/rtp/packet_stats.h/.cpp`。
+- 每次只允许一个控制请求等待回复；有 CSeq、Session、通道冲突、长度及缓冲上限检查。
+- 默认请求超时 3 秒，接收等待以 100 毫秒为单位返回；按 Session 超时的一半周期发 GET_PARAMETER，TEARDOWN 最多等 500 毫秒。
+- `a=control:*` 的 PLAY / TEARDOWN 使用输入的聚合 URL；Content-Base 用于解析轨道的相对 control，避免把 `/live/` 当作 `/live`。
+- 当前支持数字 IPv4 / localhost、一轨一个 SSRC，不实现 DNS、认证、重连、解码和 RTCP Receiver Report 发送。
+- `tests/protocol_tests.cpp` 验证纯协议；`tests/session_tests.py` 验证真实可执行程序与回环假服务器；`tests/server_integration.py` 负责配套服务端联调。
