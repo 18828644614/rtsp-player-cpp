@@ -13,7 +13,7 @@
 
 - [x] P1：实现一个 RTSP/TCP 会话，打印收到的两轨 RTP/RTCP 统计。不引入 FFmpeg、SDL3。
 - [x] P2：实现 H.264 拆包与访问单元重组，用 FFmpeg 在终端连续解帧。
-- [ ] P3：用 SDL3 创建窗口，按视频自身时间戳显示，验证关闭和断线收尾。
+- [x] P3：用 SDL3 创建窗口，按视频自身时间戳显示，验证关闭和断线收尾。
 - [ ] P4：实现 AAC-hbr 拆包、AAC 解码和 SDL3 音频输出。
 - [ ] P5：基于 RTCP SR 对齐两轨，用估算的音频播放位置调度视频，验证端到端播放。
 
@@ -49,7 +49,7 @@ P1 阶段仅实现连接和协议统计；P2 在此基础上增加 FFmpeg 视频
 - [x] 验证协议回归、重组边界、实际解码和配套服务端连续解帧。
 - [x] 更新设计、构建说明及最终验收结果。
 
-当前状态：P2 已完成。单线程、两个新增主要类，独立 FFmpeg 解码目标；P3–P5 尚未实施。
+P2 验收时状态：单线程、两个新增主要类，独立 FFmpeg 解码目标；后续 P3 进展见下文。
 
 ### P2 验收结果
 
@@ -62,3 +62,27 @@ P1 阶段仅实现连接和协议统计；P2 在此基础上增加 FFmpeg 视频
 - Release 直接依赖 avcodec-63.dll、avutil-61.dll、Winsock 和系统/MSVC 运行库。
 - 联调日志保存在 build/p2-server-integration-debug.log 和 build/p2-server-integration-release.log。
 - 复用已有 FFmpeg SDK，本机缓存保存路径；未修改配套服务器源码。
+
+## P3 实施进度（2026-11-23）
+
+目标：两个主要类（Player、VideoRenderer），SDL 主线程与一个接收解码线程，用有界帧队列按视频 PTS 显示。
+
+- [x] 接入 SDL3 和 YUV420P 渲染。
+- [x] 实现帧引用、有界队列、PTS 调度及工作线程。
+- [x] 补齐网络取消、主动关闭和异常收尾。
+- [x] 验证调度、SDL 绘制、关闭、断线及原有回归。
+- [x] 完成 Debug / Release 与配套服务端联调，更新文档。
+
+当前状态：P3 已完成。音频输出与跨轨同步仍留到 P4 / P5。
+
+### P3 验收结果
+
+- MSVC x64 Debug / Release 构建无警告，CTest 各 9/9 通过；clang-format 检查与 git diff --check 通过。
+- 保留 P1/P2 六项回归；新增 socket_cancel、video_display、player_session。
+- 验证 90 kHz PTS 换算、早到/晚到及跳变；软件渲染检查白色/红色/蓝色像素、黑边、动态尺寸、SAR 和不支持格式。QA 图片在忽略目录 build/p3-render-qa.bmp。
+- 回环验证等待 OPTIONS 时关闭、等待保活时关闭、外部停止、真实 H264 播放时关闭、TEARDOWN 超时、SDL 初始化失败、有界队列与服务端断线。
+- 发送测试在对端不读、超时设为十分钟的情况下仍能主动取消；连接/发送的等待均通过同一分片等待检查停止。
+- 配套 --serve 四秒实际窗口联调：Debug 解码/显示 75/75 帧，Release 76/76 帧；均 160×96 / YUV420P、display dropped=0、queue_peak=1、clock_resets=0、decode errors=0、H264 invalid=0。
+- 两次最终联调均两轨 bad=0、unknown_channels=0、TEARDOWN=200；日志为 build/p3-server-integration-debug.log 和 build/p3-server-integration-release.log。
+- Release dumpbin 直接依赖 avcodec-63.dll、avutil-61.dll、SDL3.dll、Winsock 和系统/MSVC 运行库；未引入 avformat、swscale 或音频解码。
+- SDK 路径仅保存在本机 CMake 缓存；SDL3 3.4.20 VC 包保存在忽略的 build/deps，未修改配套服务端源码。实体摄像头/麦克风不属于本次无设备验收。

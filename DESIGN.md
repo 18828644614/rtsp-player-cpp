@@ -20,7 +20,7 @@ TCP → 字节流拆分 ─┼─→ RTP 视频  ─→ H.264 AU ─→ 解码 �
 
 ## 模块与依赖
 
-目录按阶段引入，不先创建一排空类。P2 已实现 src/net/、src/rtsp/、src/rtp/ 和视频解码所需的 src/media/；src/player/ 留到显示阶段。
+目录按阶段引入，不先创建一排空类。P3 已实现 src/net/、src/rtsp/、src/rtp/、视频解码所需的 src/media/ 和视频播放所需的 src/player/。
 
 | 位置 | 职责 |
 | --- | --- |
@@ -125,3 +125,16 @@ FFmpeg INVALIDDATA 或损坏帧触发重置和等待 IDR；资源/API 异常向�
 - TCP 视频会话覆盖正常链路、缺片、非法 RTP、完整但损坏的码流、断连排空，均验证后续 IDR 可恢复。
 - 配套服务器 --serve 四秒联调：Debug 79 帧，Release 78 帧，均为 160×96 / YUV420P，解码错误为 0，TEARDOWN=200。
 - Release 直接依赖 avcodec-63.dll、avutil-61.dll、Winsock 和 Windows/MSVC 运行库。
+
+## P3 实际落地（2026-11-23）
+
+- 两个主要类：Player 编排播放、VideoRenderer 管理 SDL；VideoClock 是可传入当前时间的小结构体。没有通用队列或插件框架。
+- 主线程拥有 SDL 窗口、renderer、texture，事件等待不超过 10 ms；一个工作线程顺序接收、拆包和解码，不在解码回调中等待显示。
+- Player 内部 deque 保存 av_frame_clone 的独立引用，智能指针自动释放。mutex 保护队列及工作线程结束/错误状态；停止标记使用 atomic，所有线程结束后再销毁 SDL。
+- 队列最多 12 帧、跨度最多 300 ms；超限丢弃最旧已解码帧，消费者跳过积压的旧到期帧，保留最新到期帧。不阻塞网络及保活。
+- 视频相对时间轴以第一帧准备呈现时的 PTS 与 steady_clock 建立基准，目标时间按 1/90000 换算；无有效/不递增 PTS 的帧丢弃，超过 2 秒的跳变重新锚定。VideoClock 的仿真时间测试不依赖 sleep。
+- YUV420P 使用 SDL IYUV 纹理，显式选择 601/709 与有限/全范围；未指定矩阵默认 601。尺寸或颜色参数改变重建纹理，logical presentation 保持含 SAR 的显示比例。
+- 主动关闭时停止呈现，工作线程仍完成会话清理和解码排空，但不再入队。定时结束显示完有界队列；断线保留原始异常，丢弃剩余显示帧并返回失败。
+- TcpSocket 的 connect/send 等待每 50 ms 检查取消，取消异常接入 RtspClient 正常停止分支。TEARDOWN 忽略主动取消，仍最多等待 500 ms。
+- player_display 使用 STATIC 收纳已有协议/解码 OBJECT 目标，并链接 SDL3；协议测试仍不依赖 FFmpeg/SDL。SDL 路径使用 SDL3_DIR，本机 SDK 保存在忽略的构建目录。
+- 自动测试使用 SDL dummy/software 驱动，检查实际像素与黑边；回环测试注入窗口关闭及外部停止，并保留 P1/P2 协议、解码和故障恢复回归。配套 --serve 联调使用实际窗口。音频输出与跨轨同步留到 P4/P5。

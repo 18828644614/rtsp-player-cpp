@@ -8,8 +8,6 @@
 namespace rtsp {
 namespace {
 
-struct StopRequested {};
-
 std::string lower(std::string value) {
     for (auto& c : value) {
         if (c >= 'A' && c <= 'Z') {
@@ -86,7 +84,8 @@ void RtspClient::run(const std::string& url) {
         if (should_stop()) {
             throw StopRequested{};
         }
-        socket_.connect(endpoint_.host, endpoint_.port, options_.timeout_ms);
+        socket_.connect(endpoint_.host, endpoint_.port, options_.timeout_ms,
+                        [this] { return should_stop(); });
         out_ << "[TCP] connected " << endpoint_.host << ':' << endpoint_.port << '\n';
 
         request_and_wait("OPTIONS", input_url_);
@@ -138,14 +137,15 @@ RtspMessage RtspClient::request_and_wait(
     request.uri = url;
     request.headers = headers;
     request.set_header("CSeq", std::to_string(++cseq_));
-    request.set_header("User-Agent", "rtsp-player-cpp/P2");
+    request.set_header("User-Agent", "rtsp-player-cpp/P3");
     if (!session_.empty()) {
         request.set_header("Session", session_);
     }
 
     const int timeout = stopping ? std::min(options_.timeout_ms, 500) : options_.timeout_ms;
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeout);
-    socket_.send_all(serialize_rtsp_message(request), timeout);
+    socket_.send_all(serialize_rtsp_message(request), timeout,
+                     [this, stopping] { return !stopping && should_stop(); });
 
     // 等待服务器对刚才那条请求作出回复
     while (true) {

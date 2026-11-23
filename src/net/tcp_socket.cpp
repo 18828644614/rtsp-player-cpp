@@ -31,8 +31,11 @@ TcpSocket::~TcpSocket() {
     WSACleanup();
 }
 
-bool TcpSocket::wait(bool writing, Clock::time_point deadline) {
+bool TcpSocket::wait(bool writing, Clock::time_point deadline, const StopCheck& stop_requested) {
     while (true) {
+        if (stop_requested && stop_requested()) {
+            throw StopRequested{};
+        }
         const auto remaining =
             std::chrono::duration_cast<std::chrono::microseconds>(deadline - Clock::now());
         if (remaining.count() <= 0) {
@@ -44,8 +47,10 @@ bool TcpSocket::wait(bool writing, Clock::time_point deadline) {
         FD_SET(handle_, &ready);
         FD_SET(handle_, &errors);
         timeval timeout{};
-        timeout.tv_sec = static_cast<long>(remaining.count() / 1000000);
-        timeout.tv_usec = static_cast<long>(remaining.count() % 1000000);
+        // 短时间片只用于检查取消，总等待仍受原 deadline 限制。
+        const auto slice = std::min<std::int64_t>(remaining.count(), 50000);
+        timeout.tv_sec = 0;
+        timeout.tv_usec = static_cast<long>(slice);
         const int result =
             select(0, writing ? nullptr : &ready, writing ? &ready : nullptr, &errors, &timeout);
         if (result == SOCKET_ERROR) {
@@ -54,11 +59,15 @@ bool TcpSocket::wait(bool writing, Clock::time_point deadline) {
             }
             socket_error("select");
         }
-        return result > 0;
+        if (result > 0) {
+            return true;
+        }
     }
 }
 
-void TcpSocket::connect(const std::string& host, std::uint16_t port, int timeout_ms) {
+void TcpSocket::connect(
+    const std::string& host, std::uint16_t port, int timeout_ms, const StopCheck& stop_requested
+) {
     if (is_open()) {
         throw std::runtime_error("socket is already connected");
     }
@@ -82,7 +91,7 @@ void TcpSocket::connect(const std::string& host, std::uint16_t port, int timeout
         if (WSAGetLastError() != WSAEWOULDBLOCK) {
             socket_error("connect");
         }
-        if (!wait(true, Clock::now() + std::chrono::milliseconds(timeout_ms))) {
+        if (!wait(true, Clock::now() + std::chrono::milliseconds(timeout_ms), stop_requested)) {
             throw std::runtime_error("TCP connect timeout");
         }
         int error = 0;
@@ -97,11 +106,11 @@ void TcpSocket::connect(const std::string& host, std::uint16_t port, int timeout
     }
 }
 
-void TcpSocket::send_all(const std::string& data, int timeout_ms) {
+void TcpSocket::send_all(const std::string& data, int timeout_ms, const StopCheck& stop_requested) {
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
     std::size_t sent = 0;
     while (sent < data.size()) {
-        if (!wait(true, deadline)) {
+        if (!wait(true, deadline, stop_requested)) {
             throw std::runtime_error("TCP send timeout");
         }
         const int count = send(

@@ -11,9 +11,13 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 
 namespace rtsp {
+
+// 主动取消走正常停止流程，不伪装成连接错误。
+struct StopRequested {};
 
 enum class ReadStatus {
     Data,
@@ -34,8 +38,14 @@ public:
     TcpSocket(const TcpSocket&) = delete;
     TcpSocket& operator=(const TcpSocket&) = delete;
 
-    void connect(const std::string& host, std::uint16_t port, int timeout_ms);
-    void send_all(const std::string& data, int timeout_ms);
+    using StopCheck = std::function<bool()>;
+    void connect(
+        const std::string& host,
+        std::uint16_t port,
+        int timeout_ms,
+        const StopCheck& stop_requested = {}
+    );
+    void send_all(const std::string& data, int timeout_ms, const StopCheck& stop_requested = {});
     ReadResult receive(char* data, std::size_t capacity, int timeout_ms);
 
     bool is_open() const {
@@ -45,7 +55,11 @@ public:
     void close();
 
 private:
-    bool wait(bool writing, std::chrono::steady_clock::time_point deadline);
+    bool wait(
+        bool writing,
+        std::chrono::steady_clock::time_point deadline,
+        const StopCheck& stop_requested = {}
+    );
     SOCKET handle_ = INVALID_SOCKET;
 };
 

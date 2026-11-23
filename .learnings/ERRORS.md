@@ -63,3 +63,30 @@ Invalid patch: The last line of the patch must be '*** End Patch'
 
 ### 解决情况（Resolution）
 在 PowerShell 中直接调用 `codex.exe --codex-run-as-apply-patch`，把多行补丁作为单个参数传入，避免批处理转发截断。
+
+## [ERR-20261123-001] object-library-transitive-link
+
+**Logged**: 2026-11-23
+**Priority**: low
+**Status**: resolved
+**Area**: config
+
+嵌套 OBJECT 目标仅传播依赖使用要求，不会自动把间接 OBJECT 文件链接进最终程序，导致 P3 首次链接找不到协议/解码符号。播放层改用 STATIC，直接收纳链接的协议和媒体对象；协议测试仍不链接 SDL。
+
+## [ERR-20261123-002] sdl-readback-viewport
+
+**Logged**: 2026-11-23
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+SDL_RenderReadPixels 默认裁剪到当前逻辑视口，初次测试把内容边缘误当窗口黑边。软件渲染测试先切换到整个窗口视口，再检查视频像素及黑边；SDK 头文件明确说明读回的视口裁剪行为。
+
+## [ERR-20261123-003] windows-send-buffer-test
+
+**Logged**: 2026-11-23
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+Windows 可在对端不读时暂存完整 16 MiB 发送，单次发送不一定进入等待。取消测试改为持续发送至取消，避免假设固定大小必然填满系统缓冲；本机 Python 缺少 Pillow，QA 图片转换改用打包运行时。

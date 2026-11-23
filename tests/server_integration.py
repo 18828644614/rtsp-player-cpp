@@ -1,4 +1,4 @@
-"""启动配套服务端的 --serve 合成入口，验收播放器的双轨收包和连续视频解码。"""
+"""启动配套服务端的 --serve 合成入口，验收播放器的双轨收包、连续解码与 SDL3 显示。"""
 import argparse
 from pathlib import Path
 import queue
@@ -59,7 +59,11 @@ def main():
             summary = re.search(r"\[FINAL\] decode frames=(\d+) errors=(\d+)", output)
             assert summary and int(summary[1]) == len(frames) and summary[2] == "0", output
             assert re.search(r"\[FINAL\] h264 au=\d+ dropped=\d+ invalid=0", output), output
-            print(f"PASS: companion server, {len(frames)} decoded frames, dual RTP/RTCP, clean TEARDOWN")
+            display = re.search(r"\[FINAL\] display frames=(\d+) dropped=(\d+) queue_peak=(\d+) clock_resets=(\d+)", output)
+            assert display and int(display[1]) >= 20 and 0 < int(display[3]) <= 12, output
+            assert int(display[1]) + int(display[2]) == len(frames), output
+            assert display[4] == "0", output
+            print(f"PASS: companion server, {len(frames)} decoded, {display[1]} displayed, dual RTP/RTCP, clean TEARDOWN")
         finally:
             # 让短时入口自行结束，验证测试服务端也能正常收尾。
             try:

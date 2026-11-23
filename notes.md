@@ -35,3 +35,14 @@
 - 两次实际联调均为 160×96 / YUV420P，两轨 bad=0、unknown_channels=0，TEARDOWN=200。
 - Release dumpbin 确认程序直接链接 avcodec-63.dll、avutil-61.dll，无 avformat、SDL3。
 - 联调日志：忽略目录 build/p2-server-integration-debug.log、build/p2-server-integration-release.log。
+
+## P3 实现核对（2026-11-23）
+
+- 使用官方 SDL3 3.4.20 VC 开发包，保存于忽略目录 build/deps，通过 SDL3_DIR 配置，不提交 SDK。
+- Player 编排两个执行流程；VideoRenderer 的所有 SDL 窗口和绘制调用都在主线程。
+- 帧回调使用 av_frame_clone 保留引用；队列最多 12 帧且跨度不超过 300 ms，满时丢弃旧的已解码帧，不阻塞网络。
+- 保留 P2 的 [VIDEO] 解码日志；新增 [FINAL] display 区分解码帧与实际呈现帧。
+- TcpSocket 等待按 50 ms 分片检查取消，TEARDOWN 忽略主动停止但仍受最多 500 ms 期限限制。
+- SDL_RenderReadPixels 会裁剪到逻辑视口；QA 先切回全窗口视口，再验证黑边。已检查红/蓝测试图，U/V 顺序、有限范围、矩阵与等比黑边均正常。
+- 新增 socket_cancel、video_display、player_session；播放测试驱动定时注入真实 SDL 关闭事件，正式程序不增加测试开关。
+- 最终 Debug / Release CTest 各 9/9；实际窗口四秒联调分别解码并显示 75 / 76 帧，显示无丢帧、队列峰值 1。Release 直接依赖新增 SDL3.dll，没有 avformat/swscale；未修改配套服务端。
