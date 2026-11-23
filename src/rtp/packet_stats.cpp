@@ -52,7 +52,8 @@ RtpHeader parse_rtp_header(const std::string& wire) {
         static_cast<std::uint16_t>(u16(wire, 2)),
         u32(wire, 4),
         u32(wire, 8),
-        end - offset
+        end - offset,
+        offset
     };
 }
 
@@ -145,7 +146,7 @@ RtcpInfo parse_rtcp(const std::string& wire) {
     return info;
 }
 
-void count_rtp(PacketStats& stats, const std::string& wire, int expected_pt) {
+RtpHeader count_rtp(PacketStats& stats, const std::string& wire, int expected_pt) {
     const auto header = parse_rtp_header(wire);
     require(
         static_cast<int>(header.payload_type) == expected_pt, "RTP payload type differs from SDP"
@@ -157,6 +158,7 @@ void count_rtp(PacketStats& stats, const std::string& wire, int expected_pt) {
     stats.payload_bytes += header.payload_size;
     stats.last_sequence = header.sequence;
     stats.last_timestamp = header.timestamp;
+    return header;
 }
 
 void count_rtcp(PacketStats& stats, const std::string& wire) {

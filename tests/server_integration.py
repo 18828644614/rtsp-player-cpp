@@ -1,4 +1,4 @@
-"""启动配套服务端的 --serve 合成入口，验收播放器的实际双轨收包。"""
+"""启动配套服务端的 --serve 合成入口，验收播放器的双轨收包和连续视频解码。"""
 import argparse
 from pathlib import Path
 import queue
@@ -12,6 +12,8 @@ def main():
     parser.add_argument("--server", required=True, help="camera_rtsp_tests.exe path")
     parser.add_argument("--player", required=True, help="rtsp_player.exe path")
     parser.add_argument("--log", help="optional UTF-8 player output log")
+    parser.add_argument("--expect-width", type=int, default=160)
+    parser.add_argument("--expect-height", type=int, default=96)
     args = parser.parse_args()
     server_path = Path(args.server).resolve(strict=True)
     player_path = Path(args.player).resolve(strict=True)
@@ -48,7 +50,16 @@ def main():
                 counts = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", match.group(1))}
                 assert counts["rtp"] > 0 and counts["sr"] > 0 and counts["bad"] == 0, match.group(0)
             assert "[RTSP] TEARDOWN 200" in output and "unknown_channels=0" in output
-            print("PASS: companion server, dual RTP/RTCP, clean TEARDOWN")
+            frames = re.findall(r"\[VIDEO\] frame=(\d+) pts=(-?\d+) width=(\d+) height=(\d+) format=(\w+)", output)
+            assert len(frames) >= 20, f"not enough decoded frames: {len(frames)}"
+            assert all(int(w) == args.expect_width and int(h) == args.expect_height
+                       and fmt == "yuv420p" for _, _, w, h, fmt in frames), frames[:3]
+            timestamps = [int(pts) for _, pts, _, _, _ in frames]
+            assert all(a < b for a, b in zip(timestamps, timestamps[1:])), timestamps
+            summary = re.search(r"\[FINAL\] decode frames=(\d+) errors=(\d+)", output)
+            assert summary and int(summary[1]) == len(frames) and summary[2] == "0", output
+            assert re.search(r"\[FINAL\] h264 au=\d+ dropped=\d+ invalid=0", output), output
+            print(f"PASS: companion server, {len(frames)} decoded frames, dual RTP/RTCP, clean TEARDOWN")
         finally:
             # 让短时入口自行结束，验证测试服务端也能正常收尾。
             try:

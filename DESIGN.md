@@ -20,7 +20,7 @@ TCP → 字节流拆分 ─┼─→ RTP 视频  ─→ H.264 AU ─→ 解码 �
 
 ## 模块与依赖
 
-目录按阶段引入，不先创建一排空类。P1 已实现 src/net/、src/rtsp/、src/rtp/；src/media/ 和 src/player/ 留到后续阶段。
+目录按阶段引入，不先创建一排空类。P2 已实现 src/net/、src/rtsp/、src/rtp/ 和视频解码所需的 src/media/；src/player/ 留到显示阶段。
 
 | 位置 | 职责 |
 | --- | --- |
@@ -32,7 +32,7 @@ TCP → 字节流拆分 ─┼─→ RTP 视频  ─→ H.264 AU ─→ 解码 �
 | src/player/ | 一个 Player 串起处理流程；SDL3 主线程负责事件循环和视频呈现，音频交给 SDL3 设备流。 |
 | tests/ | 纯 C++ 协议测试、回环假服务器，以及对配套服务器的集成验收。 |
 
-正式构建只生成 rtsp_player。P1 加 ws2_32；P2 加 FFmpeg avcodec/avutil，按需加 swscale；播放阶段引入 SDL3，需要重采样时加 swresample。各阶段只加实际需要的依赖。包路径由本机构建配置指定，不提交机器专属路径。
+正式构建只生成 rtsp_player。P1 加 ws2_32；P2 只加 FFmpeg avcodec/avutil；画面格式转换需要时再加 swscale；播放阶段引入 SDL3，需要重采样时加 swresample。各阶段只加实际需要的依赖。包路径由本机构建配置指定，不提交机器专属路径。
 
 ## 关键设计
 
@@ -84,3 +84,44 @@ P1/P2 可用单线程验证。接窗口后，主线程处理 SDL3 事件和渲�
 - `a=control:*` 的 PLAY / TEARDOWN 使用输入的聚合 URL；Content-Base 用于解析轨道的相对 control，避免把 `/live/` 当作 `/live`。
 - 当前支持数字 IPv4 / localhost、一轨一个 SSRC，不实现 DNS、认证、重连、解码和 RTCP Receiver Report 发送。
 - `tests/protocol_tests.cpp` 验证纯协议；`tests/session_tests.py` 验证真实可执行程序与回环假服务器；`tests/server_integration.py` 负责配套服务端联调。
+
+## P2 实际落地（2026-11-23）
+
+### 模块边界
+
+- 新增两个主要类：`H264Depacketizer`、`VideoDecoder`。沿用单线程，同步调用，不增加队列。
+- `RtspClient` 持有重组器；`main` 创建解码器并设置完整 AU 回调。回调返回 false 时，重组器等待下一完整 IDR。
+- `src/rtp/h264_parameters.h/.cpp` 用普通结构体和函数处理 fmtp 与 Base64，避免把参数解析挤进重组类。
+- `src/rtsp/`、`src/rtp/` 不包含或链接 FFmpeg；`player_media` 单独链接 avcodec/avutil。
+- `RtpHeader` 增加 payload_offset，`count_rtp()` 返回已经验证的头；重组器直接使用去除扩展、CSRC、填充后的负载。
+
+### 重组与恢复
+
+重组器支持单 NALU 和 FU-A。相同时间戳内累积 NALU，marker 且 FU-A 已结束时才提交 AU。
+首次接入的 AU 边界未知，保守丢弃；完整参数集仍可保留。SDP 支持 mode 0/1 和一组 SPS/PPS，也接收流内参数集。
+序号断裂、FU-A 不完整、旧 AU 未结束便切换时间戳，或容量超限时丢弃损坏 AU，等待参数集齐全的完整 IDR。
+有序 TCP 不需要重排缓存；序号缺口仍用于检测服务端未发出的包或测试注入的缺片。
+
+AU 使用带起始码的 Annex B 字节，携带原始 RTP 时间戳、is_idr、reset_decoder。
+IDR 前补 SPS/PPS；AU 上限 8 MiB，单个参数集上限 64 KiB。
+
+### 解码与退出
+
+解码器拥有 AVCodecContext、AVPacket、AVFrame，使用独立且带 padding 的 packet 缓冲。
+使用 send/receive API，每次提交后循环取帧；FFmpeg 解码线程数设为 1。
+帧回调只借用当前 AVFrame，调用完成后 unref；后续显示阶段需要保留帧时须另外引用。
+32 位 RTP 时间戳展开为 64 位视频 PTS，单位 1/90000，支持回绕及 B 帧的时间戳回退；不建立跨轨同步时间轴。
+
+RTP/RTCP 错误增加轨道 bad；H.264 格式错误增加 invalid；边界不明、损坏和等待 IDR 的 AU 增加 dropped。
+FFmpeg INVALIDDATA 或损坏帧触发重置和等待 IDR；资源/API 异常向外传播，不会被当作协议坏包吞掉。
+结束时先停用 AU 回调并丢弃未完成 AU，再尽量 TEARDOWN，最后排空已提交的延迟帧。
+断连或其他异常退出也尝试排空，同时保留原始会话错误。
+
+### 验证
+
+- Debug / Release 构建无警告，CTest 各 6/6 通过。
+- 重组测试覆盖多 NALU、FU-A 缺片/错误头、序号回绕、参数集变更、容量、缺 marker、外部丢弃和 IDR 恢复。
+- 固定 64×48 合成码流包含 B 帧，验证实际解码、重排、延迟帧排空、RTP 时间戳回绕和解码状态重置。
+- TCP 视频会话覆盖正常链路、缺片、非法 RTP、完整但损坏的码流、断连排空，均验证后续 IDR 可恢复。
+- 配套服务器 --serve 四秒联调：Debug 79 帧，Release 78 帧，均为 160×96 / YUV420P，解码错误为 0，TEARDOWN=200。
+- Release 直接依赖 avcodec-63.dll、avutil-61.dll、Winsock 和 Windows/MSVC 运行库。

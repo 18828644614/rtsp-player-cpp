@@ -14,6 +14,7 @@ struct RtpHeader {
     std::uint32_t timestamp = 0;
     std::uint32_t ssrc = 0;
     std::size_t payload_size = 0;
+    std::size_t payload_offset = 0;
 };
 
 struct SenderReport {
@@ -57,7 +58,7 @@ struct PacketStats {
 // 先完整校验，再更新统计；一条轨道仅支持一个 SSRC。
 RtpHeader parse_rtp_header(const std::string& wire);
 RtcpInfo parse_rtcp(const std::string& wire);
-void count_rtp(PacketStats& stats, const std::string& wire, int expected_pt);
+RtpHeader count_rtp(PacketStats& stats, const std::string& wire, int expected_pt);
 void count_rtcp(PacketStats& stats, const std::string& wire);
 
 }  // namespace rtsp

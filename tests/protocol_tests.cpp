@@ -186,8 +186,8 @@ void test_sdp() {
 void test_packets() {
     const auto header = rtsp::parse_rtp_header(rtp());
     check(
-        header.payload_size == 3 && header.marker && header.sequence == 65535
-            && header.timestamp == 0xffffffff,
+        header.payload_size == 3 && header.payload_offset == 24 && header.marker
+            && header.sequence == 65535 && header.timestamp == 0xffffffff,
         "RTP extension/padding decode failed"
     );
     rejects([] { rtsp::parse_rtp_header(std::string(11, '\0')); }, "short RTP accepted");

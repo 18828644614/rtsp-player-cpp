@@ -1,8 +1,15 @@
 #include "rtsp/rtsp_client.h"
+#include "media/video_decoder.h"
+
+extern "C" {
+#include <libavutil/frame.h>
+#include <libavutil/pixdesc.h>
+}
 #include <windows.h>
 
 #include <atomic>
 #include <iostream>
+#include <exception>
 #include <stdexcept>
 #include <string>
 
@@ -35,11 +42,57 @@ int number(const std::string& value, int maximum) {
 }
 
 void help() {
-    std::cout << "rtsp_player: RTSP/TCP dual-track RTP/RTCP statistics (P1)\n"
+    std::cout << "rtsp_player: H264 decoding with dual-track RTP/RTCP statistics (P2)\n"
                  "Usage: rtsp_player <rtsp://IPv4[:port]/live> [--seconds N] [--timeout-ms N]\n"
                  "  --seconds N     Receive for N seconds after PLAY (0 = until Ctrl+C).\n"
                  "  --timeout-ms N  Connect/request timeout, 1..600000 (default 3000).\n"
-                 "Numeric IPv4 and localhost are supported. No FFmpeg or SDL3 required.\n";
+                 "Numeric IPv4 and localhost are supported. FFmpeg avcodec/avutil required.\n";
+}
+
+void print_video_frame(const AVFrame& frame, std::uint64_t number) {
+    const auto* format = av_get_pix_fmt_name(static_cast<AVPixelFormat>(frame.format));
+    std::cout << "[VIDEO] frame=" << number << " pts=" << frame.pts << " width=" << frame.width
+              << " height=" << frame.height << " format=" << (format ? format : "unknown") << '\n';
+}
+
+void run_player(const std::string& url, const rtsp::ClientOptions& options) {
+    std::uint64_t frames = 0;
+    rtsp::VideoDecoder decoder([&frames](const AVFrame& frame) {
+        print_video_frame(frame, ++frames);
+    });
+    rtsp::RtspClient client(options, std::cout, [] {
+        return stopped.load(std::memory_order_relaxed);
+    });
+    client.set_video_handler([&decoder](const rtsp::H264AccessUnit& au) {
+        const bool decoded = decoder.decode(au);
+        if (!decoded) {
+            std::cerr << "[WARN] H264 decoder rejected AU; waiting for IDR\n";
+        }
+        return decoded;
+    });
+
+    // 断连或控制请求失败时，也排空已经提交的完整 AU，并保留原始错误。
+    std::exception_ptr failure;
+    try {
+        client.run(url);
+    } catch (...) {
+        failure = std::current_exception();
+    }
+    try {
+        if (!decoder.drain()) {
+            std::cerr << "[WARN] corrupt H264 data while draining decoder\n";
+        }
+    } catch (...) {
+        if (!failure) {
+            failure = std::current_exception();
+        }
+    }
+    const auto& stats = decoder.stats();
+    std::cout << "[FINAL] decode frames=" << stats.frames << " errors=" << stats.errors
+              << " resets=" << stats.resets << std::endl;
+    if (failure) {
+        std::rethrow_exception(failure);
+    }
 }
 
 }  // namespace
@@ -76,10 +129,7 @@ int main(int argc, char* argv[]) {
             throw std::runtime_error("cannot install console handler");
         }
 
-        rtsp::RtspClient client(options, std::cout, [] {
-            return stopped.load(std::memory_order_relaxed);
-        });
-        client.run(url);
+        run_player(url, options);
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "[ERROR] " << error.what() << '\n';

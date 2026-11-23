@@ -2,11 +2,13 @@
 
 #include "net/tcp_socket.h"
 #include "rtp/packet_stats.h"
+#include "rtp/h264_depacketizer.h"
 #include "rtsp/rtsp_stream_parser.h"
 #include "rtsp/sdp.h"
 
 #include <chrono>
 #include <functional>
+#include <exception>
 #include <optional>
 #include <ostream>
 #include <vector>
@@ -29,9 +31,14 @@ struct TrackState {
 // 单线程、一次会话、每次只等待一个 RTSP 响应。
 class RtspClient {
 public:
+    using VideoHandler = std::function<bool(const H264AccessUnit&)>;
+
     RtspClient(
         ClientOptions options, std::ostream& output, std::function<bool()> stop_requested = {}
     );
+
+    // 同步回调；返回 false 要求丢弃后续依赖帧并等待 IDR。必须在 run 前设置。
+    void set_video_handler(VideoHandler handler);
 
     // 它从一个 RTSP URL 开始，依次完成连接、协商双轨、开始接收，最后负责结束会话和清理资源
     void run(const std::string& url);
@@ -51,6 +58,10 @@ private:
     );
     std::optional<RtspMessage> receive_and_dispatch(int timeout_ms);
     void dispatch_media(const RtspStreamItem& item);
+    void dispatch_rtp(TrackState& track, const std::string& wire);
+    void dispatch_video(const RtpHeader& header, const std::string& wire);
+    void report_bad_packet(TrackState& track, const std::exception& error);
+    void finish_video();
     void describe();
     void setup_track(TrackState& track, int first_channel);
     void receive_loop();
@@ -65,6 +76,9 @@ private:
 
     TcpSocket socket_;
     RtspStreamParser parser_;
+    H264Depacketizer video_;
+    VideoHandler video_handler_;
+    bool video_active_ = false;
 
     std::string input_url_;
     std::string aggregate_url_;

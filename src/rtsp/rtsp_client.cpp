@@ -47,6 +47,17 @@ RtspClient::RtspClient(
     }
 }
 
+void RtspClient::set_video_handler(VideoHandler handler) {
+    video_handler_ = std::move(handler);
+}
+
+void RtspClient::finish_video() {
+    if (video_active_) {
+        video_.finish();
+        video_active_ = false;
+    }
+}
+
 bool RtspClient::should_stop() const {
     return (stop_requested_ && stop_requested_())
            || (play_started_ && options_.seconds > 0
@@ -92,12 +103,14 @@ void RtspClient::run(const std::string& url) {
     } catch (const StopRequested&) {
         out_ << "[RTSP] stop requested\n";
     } catch (...) {
+        finish_video();
         teardown();
         socket_.close();
         print_stats("FINAL");
         throw;
     }
 
+    finish_video();
     teardown();
     socket_.close();
     print_stats("FINAL");
@@ -125,7 +138,7 @@ RtspMessage RtspClient::request_and_wait(
     request.uri = url;
     request.headers = headers;
     request.set_header("CSeq", std::to_string(++cseq_));
-    request.set_header("User-Agent", "rtsp-player-cpp/P1");
+    request.set_header("User-Agent", "rtsp-player-cpp/P2");
     if (!session_.empty()) {
         request.set_header("Session", session_);
     }
@@ -230,7 +243,7 @@ void RtspClient::describe() {
 
     const auto description = parse_sdp(response.body);
     if (description.tracks.size() != 2) {
-        throw std::runtime_error("P1 requires one video and one audio track");
+        throw std::runtime_error("requires one video and one audio track");
     }
 
     auto base = single_header(response, "Content-Base");
@@ -266,6 +279,10 @@ void RtspClient::describe() {
         out_ << "[SDP] " << kind << ' ' << track->encoding << " pt=" << track->payload_type
              << " clock=" << track->clock_rate << " control=" << state.url << '\n';
         tracks_.push_back(std::move(state));
+    }
+    if (video_handler_) {
+        video_.configure(tracks_[0].media.fmtp);
+        video_active_ = true;
     }
 }
 
@@ -310,17 +327,13 @@ void RtspClient::dispatch_media(const RtspStreamItem& item) {
         if (!rtp && item.channel != static_cast<unsigned int>(track.channels.rtcp_channel)) {
             continue;
         }
-        try {
-            if (rtp) {
-                count_rtp(track.stats, item.payload, track.media.payload_type);
-            } else {
+        if (rtp) {
+            dispatch_rtp(track, item.payload);
+        } else {
+            try {
                 count_rtcp(track.stats, item.payload);
-            }
-        } catch (const std::runtime_error& error) {
-            ++track.stats.bad;
-            if (track.stats.bad <= 3) {
-                out_ << "[WARN] " << track.media.media_type << " bad packet: " << error.what()
-                     << '\n';
+            } catch (const std::runtime_error& error) {
+                report_bad_packet(track, error);
             }
         }
         return;
@@ -328,6 +341,46 @@ void RtspClient::dispatch_media(const RtspStreamItem& item) {
     ++unknown_channels_;
     if (unknown_channels_ <= 3) {
         out_ << "[WARN] unknown interleaved channel=" << item.channel << '\n';
+    }
+}
+
+void RtspClient::report_bad_packet(TrackState& track, const std::exception& error) {
+    ++track.stats.bad;
+    if (track.stats.bad <= 3) {
+        out_ << "[WARN] " << track.media.media_type << " bad packet: " << error.what() << '\n';
+    }
+}
+
+void RtspClient::dispatch_rtp(TrackState& track, const std::string& wire) {
+    RtpHeader header;
+    try {
+        header = count_rtp(track.stats, wire, track.media.payload_type);
+    } catch (const std::runtime_error& error) {
+        report_bad_packet(track, error);
+        if (video_active_ && track.media.media_type == "video") {
+            video_.discard();
+        }
+        return;
+    }
+    if (video_active_ && track.media.media_type == "video") {
+        dispatch_video(header, wire);
+    }
+}
+
+void RtspClient::dispatch_video(const RtpHeader& header, const std::string& wire) {
+    std::optional<H264AccessUnit> au;
+    try {
+        const std::string_view payload(wire.data() + header.payload_offset, header.payload_size);
+        au = video_.push(header, payload);
+    } catch (const std::runtime_error& error) {
+        if (video_.stats().invalid <= 3) {
+            out_ << "[WARN] H264 reassembly: " << error.what() << '\n';
+        }
+        return;
+    }
+    // 回调中的解码/资源异常必须交给会话清理流程，不能误算为协议坏包。
+    if (au && !video_handler_(*au)) {
+        video_.discard();
     }
 }
 
@@ -374,8 +427,14 @@ void RtspClient::print_stats(const char* label) {
         out_ << '\n';
     }
     if (!tracks_.empty()) {
-        out_ << '[' << label << "] unknown_channels=" << unknown_channels_ << std::endl;
+        out_ << '[' << label << "] unknown_channels=" << unknown_channels_ << '\n';
     }
+    if (video_handler_) {
+        const auto& stats = video_.stats();
+        out_ << '[' << label << "] h264 au=" << stats.access_units << " dropped=" << stats.dropped
+             << " invalid=" << stats.invalid << '\n';
+    }
+    out_.flush();
 }
 
 }  // namespace rtsp

@@ -20,3 +20,18 @@
 - 复制 SDP 数字解析时补充末位上限检查，防止 channels=9 通过最大值 8 的检查；有对应回归用例。
 
 - 最终 Release 联调 4 秒：video RTP=211、audio RTP=183，两轨 SR=64、BYE=1、bad=0；TEARDOWN=200。Debug / Release CTest 各 3/3 通过，session 含 12 个回环场景。
+
+## P2 实现核对（2026-11-23）
+
+- 配套服务器 h264_packetizer.cpp 只输出单 NALU / FU-A；FU-A E 位表示 NALU 结束，整个 AU 的 marker 由发送链路另设。
+- 配套服务器 make_h264_fmtp() 输出 packetization-mode=1 和 Base64 SPS/PPS；测试入口默认视频尺寸 160×96，GOP 为 6。
+- 本机构建复用服务器已有的 shared SDK，通过 FFMPEG_ROOT 配置，播放器没有链接服务器目标或修改服务器源码。
+- 先实现纯 RTP/H.264，再接独立 FFmpeg 目标。参数解析、FU-A、AU 完成、解码提交/取帧各有独立函数。
+- Debug 首轮五项 CTest 通过；补充五个 TCP 视频故障场景后，Debug / Release 最终 CTest 均 6/6 通过。
+- 固定合成样本含八帧，解码输入顺序 I0 P3 B1 B2 I4 P7 B5 B6；用于验证 B 帧重排、padding、排空和时间戳回绕。生成方式在 tests/data/README.md。
+- Debug 四秒实际联调：video RTP=216、audio RTP=184，解出 79 帧；H264 dropped=6、invalid=0，decode errors=0、resets=1。
+- Release 四秒实际联调：video RTP=211、audio RTP=182，解出 78 帧；H264 dropped=6、invalid=0，decode errors=0、resets=1。
+- dropped=6 为首次接入/等待 IDR 的丢弃，不代表六个 RTP 包丢失。
+- 两次实际联调均为 160×96 / YUV420P，两轨 bad=0、unknown_channels=0，TEARDOWN=200。
+- Release dumpbin 确认程序直接链接 avcodec-63.dll、avutil-61.dll，无 avformat、SDL3。
+- 联调日志：忽略目录 build/p2-server-integration-debug.log、build/p2-server-integration-release.log。
