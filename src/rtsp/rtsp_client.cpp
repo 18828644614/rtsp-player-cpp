@@ -49,7 +49,16 @@ void RtspClient::set_video_handler(VideoHandler handler) {
     video_handler_ = std::move(handler);
 }
 
-void RtspClient::finish_video() {
+void RtspClient::set_audio_handlers(AudioConfigHandler on_config, AudioHandler on_audio) {
+    if (!on_config || !on_audio) {
+        throw std::invalid_argument("both audio handlers are required");
+    }
+    audio_config_handler_ = std::move(on_config);
+    audio_handler_ = std::move(on_audio);
+}
+
+void RtspClient::finish_media() {
+    audio_active_ = false;
     if (video_active_) {
         video_.finish();
         video_active_ = false;
@@ -84,8 +93,9 @@ void RtspClient::run(const std::string& url) {
         if (should_stop()) {
             throw StopRequested{};
         }
-        socket_.connect(endpoint_.host, endpoint_.port, options_.timeout_ms,
-                        [this] { return should_stop(); });
+        socket_.connect(endpoint_.host, endpoint_.port, options_.timeout_ms, [this] {
+            return should_stop();
+        });
         out_ << "[TCP] connected " << endpoint_.host << ':' << endpoint_.port << '\n';
 
         request_and_wait("OPTIONS", input_url_);
@@ -102,14 +112,14 @@ void RtspClient::run(const std::string& url) {
     } catch (const StopRequested&) {
         out_ << "[RTSP] stop requested\n";
     } catch (...) {
-        finish_video();
+        finish_media();
         teardown();
         socket_.close();
         print_stats("FINAL");
         throw;
     }
 
-    finish_video();
+    finish_media();
     teardown();
     socket_.close();
     print_stats("FINAL");
@@ -144,8 +154,9 @@ RtspMessage RtspClient::request_and_wait(
 
     const int timeout = stopping ? std::min(options_.timeout_ms, 500) : options_.timeout_ms;
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeout);
-    socket_.send_all(serialize_rtsp_message(request), timeout,
-                     [this, stopping] { return !stopping && should_stop(); });
+    socket_.send_all(serialize_rtsp_message(request), timeout, [this, stopping] {
+        return !stopping && should_stop();
+    });
 
     // 等待服务器对刚才那条请求作出回复
     while (true) {
@@ -284,6 +295,12 @@ void RtspClient::describe() {
         video_.configure(tracks_[0].media.fmtp);
         video_active_ = true;
     }
+    if (audio_handler_) {
+        const auto& media = tracks_[1].media;
+        const auto& parameters = audio_.configure(media.fmtp, media.clock_rate, media.channels);
+        audio_config_handler_(parameters);
+        audio_active_ = true;
+    }
 }
 
 void RtspClient::setup_track(TrackState& track, int first_channel) {
@@ -364,6 +381,8 @@ void RtspClient::dispatch_rtp(TrackState& track, const std::string& wire) {
     }
     if (video_active_ && track.media.media_type == "video") {
         dispatch_video(header, wire);
+    } else if (audio_active_ && track.media.media_type == "audio") {
+        dispatch_audio(header, wire);
     }
 }
 
@@ -381,6 +400,23 @@ void RtspClient::dispatch_video(const RtpHeader& header, const std::string& wire
     // 回调中的解码/资源异常必须交给会话清理流程，不能误算为协议坏包。
     if (au && !video_handler_(*au)) {
         video_.discard();
+    }
+}
+
+void RtspClient::dispatch_audio(const RtpHeader& header, const std::string& wire) {
+    std::optional<AacAccessUnit> au;
+    try {
+        const std::string_view payload(wire.data() + header.payload_offset, header.payload_size);
+        au = audio_.push(header, payload);
+    } catch (const std::runtime_error& error) {
+        if (audio_.stats().invalid <= 3) {
+            out_ << "[WARN] AAC unpack: " << error.what() << '\n';
+        }
+        return;
+    }
+    // 解码器和输出设备的异常交给会话清理，不能记作协议坏包。
+    if (au) {
+        audio_handler_(*au);
     }
 }
 
@@ -433,6 +469,11 @@ void RtspClient::print_stats(const char* label) {
         const auto& stats = video_.stats();
         out_ << '[' << label << "] h264 au=" << stats.access_units << " dropped=" << stats.dropped
              << " invalid=" << stats.invalid << '\n';
+    }
+    if (audio_handler_) {
+        const auto& stats = audio_.stats();
+        out_ << '[' << label << "] aac au=" << stats.access_units << " dropped=" << stats.dropped
+             << " invalid=" << stats.invalid << " lost=" << stats.lost << '\n';
     }
     out_.flush();
 }

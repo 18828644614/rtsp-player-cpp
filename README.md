@@ -2,13 +2,13 @@
 
 配套服务器：[rtsp-cpp](../rtsp-cpp/README.md)。独立的 Windows / C++17 项目。
 
-**P3 已实现：建立 RTSP/TCP 双轨会话，解码 H.264，并在 SDL3 窗口按视频 PTS 显示。**
-主线程处理窗口事件和画面，一个工作线程负责网络、重组和解码。视频解码链接 `avcodec`、`avutil`，TCP 使用 Winsock。
-音频 RTP/RTCP 继续接收和统计；音频输出与跨轨同步留到 P4 / P5。
+**P4 已实现：建立 RTSP/TCP 双轨会话，显示 H.264 视频，并解码播放 AAC 音频。**
+主线程处理窗口事件和画面，一个工作线程负责网络、重组和解码。媒体解码链接 `avcodec`、`avutil`，TCP 使用 Winsock。
+音频通过 SDL3 设备流输出，输入缓冲限制为 300 ms；视频继续按自身 PTS 调度，跨轨同步留到 P5。
 
 ## 构建和测试
 
-需要 Visual Studio C++ x64 工具链、CMake、SDL3 3.2+ 的 VC x64 开发包，以及包含 H.264 解码器的 FFmpeg x64 shared SDK：
+需要 Visual Studio C++ x64 工具链、CMake、SDL3 3.2+ 的 VC x64 开发包，以及包含 H.264 / AAC 解码器的 FFmpeg x64 shared SDK：
 
 ```text
 <FFMPEG_ROOT>/
@@ -59,11 +59,13 @@ TCP → RTSP/交织帧拆分 → RtspClient
                           ├─ 视频 RTP → 校验和统计 → H264Depacketizer
                           │                              ↓ 完整 AU 回调
                           │                         VideoDecoder → 有界帧队列 → SDL3（主线程）
-                          ├─ 音频 RTP → 校验和统计
+                          ├─ 音频 RTP → 校验和统计 → AacDepacketizer
+                          │                              ↓ 完整 AU 回调
+                          │                         AudioDecoder → AudioOutput → SDL3 音频设备
                           └─ RTCP     → 校验和统计
 ```
 
-`main` 只处理参数、控制台停止和顶层错误。`Player` 连接工作线程与 SDL 主线程；`VideoRenderer` 管理窗口和绘制。
+`main` 只处理参数、控制台停止和顶层错误。`Player` 连接工作线程与 SDL 主线程；`VideoRenderer` 管理窗口和绘制，`AudioOutput` 管理音频设备流。
 `src/rtsp/`、`src/rtp/` 不依赖 FFmpeg 或 SDL。控制请求等待和正常接收共用分发入口；等待保活响应时媒体仍继续处理。
 
 解码回调用 `av_frame_clone` 保留引用后入队；队列最多 12 帧且 PTS 跨度不超过 300 ms。超限丢弃最旧的已解码帧，不阻塞收包。
@@ -73,8 +75,17 @@ TCP → RTSP/交织帧拆分 → RtspClient
 支持 YUV420P，按帧的 601/709 矩阵与有限/全范围上传；未指定矩阵时按 601。尺寸变化重建纹理，缩放保持显示宽高比（含像素宽高比），空白处留黑边。
 其他像素格式明确报错，暂不引入 swscale。
 
-退出时先停止新 AU、丢弃未完成 AU，有限尝试 TEARDOWN，再排空解码器。定时结束会显示完有界队列；主动关闭或断线丢弃待显示帧。
-工作线程结束后才销毁 SDL。连接和发送等待每 50 ms 检查取消；TEARDOWN 有独立的最多 500 ms 清理期限。
+退出时先停止新 AU、丢弃未完成视频 AU，有限尝试 TEARDOWN，再排空两个解码器。定时结束显示完有界视频队列，音频排空最多等待 500 ms；主动关闭或断线清空剩余音频并丢弃待显示帧。
+主线程初始化音频子系统；工作线程结束后先销毁音频流，再由 VideoRenderer 销毁 SDL。连接和发送等待每 50 ms 检查取消；TEARDOWN 有独立的最多 500 ms 清理期限。
+
+## AAC 支持范围
+
+- 配套服务端的 48 kHz、单声道 AAC-LC，每个 RTP 包一个完整 AU，最多 8191 字节。
+- 校验 SDP 的 AAC-hbr、SizeLength=13、IndexLength=3、IndexDeltaLength=3；config 解码为 AudioSpecificConfig，核对采样率、声道及 1024 样本配置。参数名忽略大小写；未知或重复参数明确报错。
+- 去除 RTP 与 AU 头后提交裸 AAC，不添加 ADTS。重复/旧包丢弃，序号缺口计数；时间戳扩展支持 32 位回绕，损坏 AU 丢弃后继续处理。
+- FFmpeg 输出的单声道 FLTP/FLT 直接作为 F32 PCM 提交 SDL，由 SDL 适配设备格式；不新增 swresample 依赖。
+- SDL 输入缓冲最多 300 ms，超限清空积压再提交最新帧，不阻塞收包；设备端仍有少量缓冲，不把输入缓冲当作精确播放时钟。
+- 日志新增 aac、audio_decode、audio_output 统计；记录解码样本数、错误数、输入队列峰值及溢出次数。
 
 ## H.264 支持范围
 
@@ -147,13 +158,13 @@ CTest 包含九项测试（Python 不存在时运行六项 C++ 测试）：
 配套服务端已有 `camera_rtsp_tests.exe --serve`，可提供约 12 秒合成双轨流：
 
 ```powershell
-python tests/server_integration.py --server E:\MarkDown\rtsp-cpp\build-live-learning\Debug\camera_rtsp_tests.exe --player build/Debug/rtsp_player.exe --log build/p3-server-integration-debug.log
+python tests/server_integration.py --server E:\MarkDown\rtsp-cpp\build-live-learning\Debug\camera_rtsp_tests.exe --player build/Debug/rtsp_player.exe --log build/p4-server-integration-debug.log
 ```
 
-脚本打开实际 SDL 窗口，验证四秒内连续解码并显示至少 20 帧，尺寸为 160×96、格式为 YUV420P，双轨 RTP/RTCP 正常且 TEARDOWN 成功。
+脚本打开实际 SDL 窗口和音频设备，验证四秒内连续解码并显示至少 20 帧，尺寸为 160×96、格式为 YUV420P；同时验证至少 100 个 AAC 帧、样本数、零解码错误及音频缓冲上限，双轨 RTP/RTCP 正常且 TEARDOWN 成功。自动测试使用 dummy 音频驱动，不代替人工听音。
 如改用其他合成源，可用 `--expect-width` / `--expect-height` 设置预期尺寸。
 
-P3 验收结果见 [task_plan.md](task_plan.md)，渲染测试同时在构建目录输出 `p3-render-qa.bmp`。
+P4 验收结果见 [task_plan.md](task_plan.md)，渲染测试同时在构建目录输出 `p3-render-qa.bmp`。
 
 ## 代码阅读顺序
 

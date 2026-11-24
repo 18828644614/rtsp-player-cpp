@@ -138,3 +138,16 @@ FFmpeg INVALIDDATA 或损坏帧触发重置和等待 IDR；资源/API 异常向�
 - TcpSocket 的 connect/send 等待每 50 ms 检查取消，取消异常接入 RtspClient 正常停止分支。TEARDOWN 忽略主动取消，仍最多等待 500 ms。
 - player_display 使用 STATIC 收纳已有协议/解码 OBJECT 目标，并链接 SDL3；协议测试仍不依赖 FFmpeg/SDL。SDL 路径使用 SDL3_DIR，本机 SDK 保存在忽略的构建目录。
 - 自动测试使用 SDL dummy/software 驱动，检查实际像素与黑边；回环测试注入窗口关闭及外部停止，并保留 P1/P2 协议、解码和故障恢复回归。配套 --serve 联调使用实际窗口。音频输出与跨轨同步留到 P4/P5。
+
+## P4 实际落地（2026-11-24）
+
+- 新增三个主要类：AacDepacketizer 处理协议、AudioDecoder 负责 FFmpeg 解码、AudioOutput 管理 SDL 音频流；没有通用媒体管线或额外应用线程。
+- AacParameters 保存二进制 ASC 和音频格式，AacAccessUnit 保存裸 AAC 与扩展后的 RTP PTS。配置在 DESCRIBE 后同步回调给解码器，AU 在收包线程同步回调，RtspClient 仍不依赖 FFmpeg/SDL。
+- 首版仅支持配套服务端的 48 kHz 单声道 AAC-LC、1024 样本、每包一个完整 AU；校验 AAC-hbr、13/3/3 位 AU 头参数、ASC 与 rtpmap 一致性。多 AU、分片、非零 AU-index、未知打包参数明确拒绝。
+- AU 大小为 1..8191 字节，必须与实际 payload 匹配；不拼接 ADTS。重复/旧包丢弃，序号缺口计数，坏包不阻止后续完整 AU；时间戳在协议层扩展为 64 位。
+- AudioDecoder 持有 AVCodecContext/AVPacket/AVFrame，ASC 和输入包分别分配 FFmpeg 要求的零填充尾部；按 send/receive API 解码、排空，损坏码流计数并 flush 后继续。帧仅在同步回调期间有效，资源或回调异常向外传播。
+- 单声道 FLTP 的唯一平面直接作为 F32 PCM；SDL_PutAudioStreamData 返回前复制数据，回调结束即可释放帧。设备格式转换交给 SDL，不添加 swresample，不增加应用层 PCM 队列。
+- AudioOutput 在主线程初始化音频子系统，首个解码帧到达时由工作线程打开并启动设备流；推送、查询、清空和排空均由工作线程独占。主线程 join 后销毁音频流，VideoRenderer 最后执行 SDL_Quit。
+- SDL 输入缓冲上限为 300 ms，提交前超限则清空积压并计数，避免拖住共用的收包线程。这里只限制流输入积压；设备端另有少量缓冲，P4 不据此计算同步时钟。
+- 正常定时结束排空两个解码器，并对音频流 Flush 后有限等待输入/输出数据被消费，最多 500 ms，每 5 ms 检查主动停止。主动关闭或断线清空音频；任何清理异常保留原始失败。
+- 保留视频时钟和帧队列；P5 再引入 SR 对齐及估算音频播放时钟。

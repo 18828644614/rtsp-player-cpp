@@ -3,6 +3,7 @@
 #include "net/tcp_socket.h"
 #include "rtp/packet_stats.h"
 #include "rtp/h264_depacketizer.h"
+#include "rtp/aac_depacketizer.h"
 #include "rtsp/rtsp_stream_parser.h"
 #include "rtsp/sdp.h"
 
@@ -32,6 +33,8 @@ struct TrackState {
 class RtspClient {
 public:
     using VideoHandler = std::function<bool(const H264AccessUnit&)>;
+    using AudioConfigHandler = std::function<void(const AacParameters&)>;
+    using AudioHandler = std::function<void(const AacAccessUnit&)>;
 
     RtspClient(
         ClientOptions options, std::ostream& output, std::function<bool()> stop_requested = {}
@@ -39,6 +42,8 @@ public:
 
     // 同步回调；返回 false 要求丢弃后续依赖帧并等待 IDR。必须在 run 前设置。
     void set_video_handler(VideoHandler handler);
+    // 配置在 DESCRIBE 后回调，完整 AU 在收包时同步回调；必须在 run 前设置。
+    void set_audio_handlers(AudioConfigHandler on_config, AudioHandler on_audio);
 
     // 它从一个 RTSP URL 开始，依次完成连接、协商双轨、开始接收，最后负责结束会话和清理资源
     void run(const std::string& url);
@@ -60,8 +65,9 @@ private:
     void dispatch_media(const RtspStreamItem& item);
     void dispatch_rtp(TrackState& track, const std::string& wire);
     void dispatch_video(const RtpHeader& header, const std::string& wire);
+    void dispatch_audio(const RtpHeader& header, const std::string& wire);
     void report_bad_packet(TrackState& track, const std::exception& error);
-    void finish_video();
+    void finish_media();
     void describe();
     void setup_track(TrackState& track, int first_channel);
     void receive_loop();
@@ -79,6 +85,10 @@ private:
     H264Depacketizer video_;
     VideoHandler video_handler_;
     bool video_active_ = false;
+    AacDepacketizer audio_;
+    AudioConfigHandler audio_config_handler_;
+    AudioHandler audio_handler_;
+    bool audio_active_ = false;
 
     std::string input_url_;
     std::string aggregate_url_;

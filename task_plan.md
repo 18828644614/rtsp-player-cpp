@@ -13,8 +13,8 @@
 
 - [x] P1：实现一个 RTSP/TCP 会话，打印收到的两轨 RTP/RTCP 统计。不引入 FFmpeg、SDL3。
 - [x] P2：实现 H.264 拆包与访问单元重组，用 FFmpeg 在终端连续解帧。
-- [x] P3：用 SDL3 创建窗口，按视频自身时间戳显示，验证关闭和断线收尾。
-- [ ] P4：实现 AAC-hbr 拆包、AAC 解码和 SDL3 音频输出。
+- [x] P3：用 SDL3 创建窗口，按视频自身时间戳P4：实现 AAC-hbr 拆包、AAC 解码和 SDL3 音频输出。显示，验证关闭和断线收尾。
+- [x] 
 - [ ] P5：基于 RTCP SR 对齐两轨，用估算的音频播放位置调度视频，验证端到端播放。
 
 P1 阶段仅实现连接和协议统计；P2 在此基础上增加 FFmpeg 视频解码。
@@ -73,7 +73,7 @@ P2 验收时状态：单线程、两个新增主要类，独立 FFmpeg 解码目
 - [x] 验证调度、SDL 绘制、关闭、断线及原有回归。
 - [x] 完成 Debug / Release 与配套服务端联调，更新文档。
 
-当前状态：P3 已完成。音频输出与跨轨同步仍留到 P4 / P5。
+P3 验收时状态：窗口播放已完成；音频输出与跨轨同步留到后续阶段。P4 进展见下文。
 
 ### P3 验收结果
 
@@ -86,3 +86,27 @@ P2 验收时状态：单线程、两个新增主要类，独立 FFmpeg 解码目
 - 两次最终联调均两轨 bad=0、unknown_channels=0、TEARDOWN=200；日志为 build/p3-server-integration-debug.log 和 build/p3-server-integration-release.log。
 - Release dumpbin 直接依赖 avcodec-63.dll、avutil-61.dll、SDL3.dll、Winsock 和系统/MSVC 运行库；未引入 avformat、swscale 或音频解码。
 - SDK 路径仅保存在本机 CMake 缓存；SDL3 3.4.20 VC 包保存在忽略的 build/deps，未修改配套服务端源码。实体摄像头/麦克风不属于本次无设备验收。
+
+## P4 实施进度（2026-11-24）
+
+目标：新增 AacDepacketizer、AudioDecoder、AudioOutput 三个主要类，沿用主线程和一个接收解码工作线程，完成配套服务端 AAC 音频播放。
+
+- [x] 实现 AAC-hbr 参数校验、单 AU 拆包、序号检查及 RTP 时间戳扩展。
+- [x] 实现 AudioSpecificConfig 初始化、FFmpeg AAC 解码、损坏 AU 恢复及排空。
+- [x] 实现 SDL3 F32 单声道音频输出、300 ms 输入缓冲上限及有限排空。
+- [x] 接入双轨回调，验证关闭、断线、设备失败和资源释放。
+- [x] 完成 Debug / Release 回归、配套服务端联调及文档更新。
+
+当前状态：P4 已实现。视频继续使用自身 PTS；RTCP SR 对齐与音频播放时钟留到 P5。
+
+### P4 验收结果
+
+- MSVC x64 Debug / Release 构建成功，无编译警告；CTest 各 13/13 通过。最后整理帮助文字和测试代码后，Debug 相关三项亦重新通过。clang-format 检查与 git diff --check 通过。
+- 保留原有九项回归；新增 aac、audio_decoder、audio_output、audio_session。协议测试不依赖 FFmpeg/SDL；自动播放测试使用 SDL dummy 音频驱动。
+- 覆盖 ASC 和 13/3/3 位 AU 参数、空包/截断/声明长度不符、多 AU/分片拒绝、8191 字节上限、重复/旧包、丢包恢复及序号/时间戳回绕。
+- 固定合成 AAC 样本解码为 13 帧、13312 个样本，验证非静音浮点 PCM、采样率/声道、PTS、排空、损坏 AU 后恢复以及回调异常传播。
+- SDL 测试验证实际设备流提交、输入缓冲不超过 300 ms、突发积压清空、有限排空、停止取消、不支持的 PCM 格式、设备打开失败及子系统释放。双轨回环还验证实际音频播放期间关闭窗口/外部停止、断线和 SDP 配置不兼容。
+- 配套 --serve 四秒实际窗口和默认音频设备联调：Debug 视频解码/显示 79/79 帧，AAC 解码 186 帧、190464 个样本，音频输入峰值 80 ms；Release 视频 76/76 帧，AAC 180 帧、184320 个样本，输入峰值 65 ms。两次均音频 decode errors=0、AAC invalid/lost/dropped=0、audio overflows=0。
+- 两次联调均两轨 RTP bad=0、unknown_channels=0、TEARDOWN=200，视频显示无丢帧。日志保存在忽略目录 build/p4-server-integration-debug.log 和 build/p4-server-integration-release.log。
+- Release dumpbin 直接依赖仍为 avcodec-63.dll、avutil-61.dll、SDL3.dll、Winsock 和系统/MSVC 运行库，没有新增 swresample、swscale 或 avformat。未修改配套服务端源码。
+- 本次验证合成音频的解码和实际设备流输出；未进行人工听音、实体摄像头/麦克风采集或音视频同步验收。

@@ -71,7 +71,7 @@ class Server:
             audio_control = self.url + "/same" if self.mode == "duplicate_url" else self.url + "/a-track"
             body = ("v=0\r\ns=contains$dollar\r\na=control:*\r\n"
                     "m=audio 0 RTP/AVP 111\r\na=rtpmap:111 MPEG4-GENERIC/48000/1\r\n"
-                    f"a=fmtp:111 config=1188\r\na=control:{audio_control}\r\n"
+                    f"a=fmtp:111 mode=AAC-hbr;config=1188;SizeLength=13;IndexLength=3;IndexDeltaLength=3\r\na=control:{audio_control}\r\n"
                     "m=video 0 RTP/AVP 104\r\na=rtpmap:104 H264/90000\r\n"
                     f"a=control:{video_control}\r\n").encode()
             if self.mode == "wrong_cseq":

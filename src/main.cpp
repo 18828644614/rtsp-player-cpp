@@ -36,7 +36,7 @@ int number(const std::string& value, int maximum) {
 
 void help() {
     std::cout
-        << "rtsp_player: SDL3 video with dual-track RTP/RTCP statistics (P3)\n"
+        << "rtsp_player: SDL3 video/audio with dual-track RTP/RTCP statistics (P4)\n"
            "Usage: rtsp_player <rtsp://IPv4[:port]/live> [--seconds N] [--timeout-ms N]\n"
            "  --seconds N     Receive for N seconds after PLAY (0 = until window close or Ctrl+C).\n"
            "  --timeout-ms N  Connect/request timeout, 1..600000 (default 3000).\n"

@@ -46,3 +46,11 @@
 - SDL_RenderReadPixels 会裁剪到逻辑视口；QA 先切回全窗口视口，再验证黑边。已检查红/蓝测试图，U/V 顺序、有限范围、矩阵与等比黑边均正常。
 - 新增 socket_cancel、video_display、player_session；播放测试驱动定时注入真实 SDL 关闭事件，正式程序不增加测试开关。
 - 最终 Debug / Release CTest 各 9/9；实际窗口四秒联调分别解码并显示 75 / 76 帧，显示无丢帧、队列峰值 1。Release 直接依赖新增 SDL3.dll，没有 avformat/swscale；未修改配套服务端。
+
+## P4 实现核对（2026-11-24）
+
+- 三个主要类：AacDepacketizer 拆单 AU，AudioDecoder 解码，AudioOutput 输出；RtspClient 通过配置/AU 回调与 Player 连接，继续保持协议层无 FFmpeg/SDL 依赖。
+- 范围固定为配套服务端 48 kHz 单声道 AAC-LC；ASC 从 SDP 读取并校验，不固定 config 字符串，不拼 ADTS。完整 AU 携带 64 位音频 PTS，为 P5 保留时间信息。
+- 单声道 FLTP 直接作为连续 F32 PCM 提交 SDL，设备适配由 SDL 完成，无需新增 swresample。输入积压最多 300 ms，超限清空积压，统计 overflows；不增加应用层音频队列或线程。
+- 主线程创建音频输出对象，工作线程独占设备流操作；join 后销毁流，最后由视频对象销毁 SDL。正常结束音频最多排空 500 ms；主动停止/断线清空，保留最初异常。
+- 最终 Debug / Release CTest 各 13/13；四秒配套服务端实际设备流联调分别解码 AAC 186 / 180 帧，输入队列峰值 80 / 65 ms，均零错误、零溢出。实际听音及跨轨同步仍需后续人工/P5 验证。

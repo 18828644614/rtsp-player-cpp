@@ -90,3 +90,16 @@ SDL_RenderReadPixels 默认裁剪到当前逻辑视口，初次测试把内容�
 **Area**: tests
 
 Windows 可在对端不读时暂存完整 16 MiB 发送，单次发送不一定进入等待。取消测试改为持续发送至取消，避免假设固定大小必然填满系统缓冲；本机 Python 缺少 Pillow，QA 图片转换改用打包运行时。
+
+## [ERR-20261124-001] p4-edit-and-aac-fixture
+
+**Logged**: 2026-11-24
+**Priority**: low
+**Status**: resolved
+**Area**: tests
+
+### 摘要（Summary）
+精确替换脚本初次未匹配 CRLF 多行文本（missing stats tail / missing stats flush），改为先统一换行再替换，未匹配的内存修改未写回。AAC 测试样本生成指定 12 帧后，实际 ADTS 包含编码器延迟/排空产生的 13 个 AU，初次测试报 expected twelve AAC AUs。
+
+### 解决情况（Resolution）
+修改工具统一读取换行；解析样本实际 AU 数并将验收改为 13 帧、13312 个样本，保留合成命令及延迟说明。

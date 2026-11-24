@@ -1,6 +1,8 @@
 #include "player/player.h"
 #include "player/video_renderer.h"
 #include "media/video_decoder.h"
+#include "media/audio_decoder.h"
+#include "player/audio_output.h"
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -77,11 +79,16 @@ Player::Frame Player::take_due_frame(VideoClock::Time now) {
     return due;
 }
 
-void Player::decode_video(const std::string& url) {
+void Player::decode_media(const std::string& url, AudioOutput& audio_output) {
     std::uint64_t decoded_frames = 0;
     VideoDecoder decoder([this, &decoded_frames](const AVFrame& frame) {
         print_frame(frame, ++decoded_frames);
         enqueue_frame(frame);
+    });
+    AudioDecoder audio_decoder([this, &audio_output](const AVFrame& frame) {
+        if (!should_stop()) {
+            audio_output.push(frame);
+        }
     });
     RtspClient client(options_, std::cout, [this] { return should_stop(); });
     client.set_video_handler([&decoder](const H264AccessUnit& au) {
@@ -92,34 +99,68 @@ void Player::decode_video(const std::string& url) {
         return decoded;
     });
 
+    client.set_audio_handlers(
+        [&audio_decoder](const AacParameters& parameters) { audio_decoder.configure(parameters); },
+        [&audio_decoder](const AacAccessUnit& au) {
+            if (!audio_decoder.decode(au) && audio_decoder.stats().errors <= 3) {
+                std::cerr << "[WARN] AAC decoder rejected AU; continuing with next AU\n";
+            }
+        }
+    );
+
     std::exception_ptr failure;
     try {
         client.run(url);
     } catch (...) {
         failure = std::current_exception();
     }
-    // 已提交的数据仍排空以释放延迟帧；主动关闭时 enqueue_frame 会直接丢弃。
-    try {
+    // 两个解码器都尝试排空；后续清理失败时保留最初的异常。
+    const auto finish = [&failure](auto operation) {
+        try {
+            operation();
+        } catch (...) {
+            if (!failure) {
+                failure = std::current_exception();
+            }
+        }
+    };
+    finish([&] {
         if (!decoder.drain()) {
             std::cerr << "[WARN] corrupt H264 data while draining decoder\n";
         }
-    } catch (...) {
-        if (!failure) {
-            failure = std::current_exception();
+    });
+    finish([&] {
+        if (!audio_decoder.drain()) {
+            std::cerr << "[WARN] corrupt AAC data while draining decoder\n";
         }
-    }
+    });
+    finish([&] {
+        if (failure || should_stop()) {
+            audio_output.clear();
+        } else {
+            audio_output.drain([this] { return should_stop(); });
+        }
+    });
     const auto& stats = decoder.stats();
     std::cout << "[FINAL] decode frames=" << stats.frames << " errors=" << stats.errors
               << " resets=" << stats.resets << std::endl;
+    const auto& audio_stats = audio_decoder.stats();
+    std::cout << "[FINAL] audio_decode frames=" << audio_stats.frames
+              << " samples=" << audio_stats.samples << " errors=" << audio_stats.errors
+              << std::endl;
+    const auto& output_stats = audio_output.stats();
+    std::cout << "[FINAL] audio_output samples=" << output_stats.samples
+              << " queue_peak_ms=" << output_stats.queue_peak_ms
+              << " overflows=" << output_stats.overflows << std::endl;
     if (failure) {
         std::rethrow_exception(failure);
     }
 }
 
-void Player::receive_video(const std::string& url) {
+void Player::receive_media(const std::string& url, AudioOutput& audio_output) {
     std::exception_ptr failure;
     try {
-        decode_video(url);
+        decode_media(url, audio_output);
     } catch (...) {
         failure = std::current_exception();
     }
@@ -129,8 +170,11 @@ void Player::receive_video(const std::string& url) {
 }
 
 void Player::run(const std::string& url) {
+    // 创建的是局部对象，它的构造函数会初始化 SDL、创建窗口和 renderer
     VideoRenderer renderer;
-    std::thread worker(&Player::receive_video, this, url);
+    // renderer 最后销毁；音频初始化/释放在主线程，设备流由工作线程使用。
+    AudioOutput audio_output;
+    std::thread worker(&Player::receive_media, this, url, std::ref(audio_output));
     std::uint64_t displayed = 0;
     std::exception_ptr display_failure;
     try {
@@ -141,6 +185,9 @@ void Player::run(const std::string& url) {
             }
             Frame frame;
             bool finished;
+            // 取到期帧
+            // 工作线程：向 frames_ 入队
+            // 主线程：从 frames_ 出队
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (failure_) {
@@ -149,6 +196,8 @@ void Player::run(const std::string& url) {
                 frame = take_due_frame(VideoClock::Clock::now());
                 finished = done_ && frames_.empty();
             }
+
+            // 显示视频帧
             if (frame) {
                 renderer.present(*frame);
                 ++displayed;

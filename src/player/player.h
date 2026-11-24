@@ -15,6 +15,8 @@ struct AVFrame;
 
 namespace rtsp {
 
+class AudioOutput;
+
 // 一个实例运行一个会话；run 在主线程调用。
 class Player {
 public:
@@ -29,8 +31,8 @@ private:
 
     using Frame = std::unique_ptr<AVFrame, FrameDeleter>;
 
-    void receive_video(const std::string& url);
-    void decode_video(const std::string& url);
+    void receive_media(const std::string& url, AudioOutput& audio_output);
+    void decode_media(const std::string& url, AudioOutput& audio_output);
     void enqueue_frame(const AVFrame& frame);
     Frame take_due_frame(VideoClock::Time now);
     bool should_stop() const;

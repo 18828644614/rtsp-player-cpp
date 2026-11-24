@@ -63,7 +63,14 @@ def main():
             assert display and int(display[1]) >= 20 and 0 < int(display[3]) <= 12, output
             assert int(display[1]) + int(display[2]) == len(frames), output
             assert display[4] == "0", output
-            print(f"PASS: companion server, {len(frames)} decoded, {display[1]} displayed, dual RTP/RTCP, clean TEARDOWN")
+            aac = re.search(r"\[FINAL\] aac au=(\d+) dropped=(\d+) invalid=(\d+) lost=(\d+)", output)
+            audio = re.search(r"\[FINAL\] audio_decode frames=(\d+) samples=(\d+) errors=(\d+)", output)
+            device = re.search(r"\[FINAL\] audio_output samples=(\d+) queue_peak_ms=(\d+) overflows=(\d+)", output)
+            assert aac and int(aac[1]) >= 100 and aac.groups()[1:] == ("0", "0", "0"), output
+            assert audio and int(audio[1]) >= 100 and int(audio[2]) == int(audio[1]) * 1024 and audio[3] == "0", output
+            assert device and device[1] == audio[2] and 0 < int(device[2]) <= 300 and device[3] == "0", output
+            print(f"PASS: companion server, {len(frames)} video decoded, {display[1]} displayed, "
+                  f"{audio[1]} audio decoded, audio peak={device[2]} ms, clean TEARDOWN")
         finally:
             # 让短时入口自行结束，验证测试服务端也能正常收尾。
             try:
