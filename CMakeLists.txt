@@ -109,6 +109,13 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/video_64x48.h264")
     set_tests_properties(video_decoder PROPERTIES TIMEOUT 5)
 
+    add_executable(sync_clock_tests tests/sync_clock_tests.cpp)
+    target_include_directories(sync_clock_tests PRIVATE src)
+    target_compile_features(sync_clock_tests PRIVATE cxx_std_17)
+    player_warnings(sync_clock_tests)
+    add_test(NAME sync_clock COMMAND sync_clock_tests)
+    set_tests_properties(sync_clock PROPERTIES TIMEOUT 5)
+
     add_executable(video_display_tests tests/video_display_tests.cpp)
     target_link_libraries(video_display_tests PRIVATE player_display)
     player_warnings(video_display_tests)
@@ -143,7 +150,12 @@ if(BUILD_TESTING)
             --video "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/video_64x48.h264"
             --audio "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/audio_48k_mono.aac")
         set_tests_properties(audio_session PROPERTIES TIMEOUT 30)
-        set_tests_properties(session video_session player_session audio_session PROPERTIES
+        add_test(NAME sync_session COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/sync_session_tests.py"
+            --player "$<TARGET_FILE:rtsp_player>" --driver "$<TARGET_FILE:player_test_driver>"
+            --fixture "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/video_64x48.h264")
+        set_tests_properties(sync_session PROPERTIES TIMEOUT 30)
+        set_tests_properties(session video_session player_session audio_session sync_session PROPERTIES
             ENVIRONMENT "SDL_VIDEODRIVER=dummy;SDL_RENDER_DRIVER=software;SDL_AUDIODRIVER=dummy")
     endif()
 endif()

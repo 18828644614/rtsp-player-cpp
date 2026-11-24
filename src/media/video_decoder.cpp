@@ -78,6 +78,9 @@ std::int64_t VideoDecoder::extend_timestamp(std::uint32_t timestamp) {
         pts_ += delta <= 0x7fffffffU ? static_cast<std::int64_t>(delta)
                                      : static_cast<std::int64_t>(delta) - 0x100000000LL;
     }
+    if (!last_timestamp_) {
+        pts_ = timestamp;  // 保留 RTP 起点，供 SR 对齐；之后继续按有符号差展开。
+    }
     last_timestamp_ = timestamp;
     return pts_;
 }

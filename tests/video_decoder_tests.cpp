@@ -91,12 +91,18 @@ void test_decode_and_drain(const std::vector<std::string>& units) {
     check(decoder.drain() && decoder.drain(), "drain failed or was not idempotent");
     check(timestamps.size() == 8, "drain lost delayed frames");
     for (std::size_t i = 0; i < timestamps.size(); ++i) {
-        check(timestamps[i] == static_cast<std::int64_t>(i * 9000), "frame PTS/reordering changed");
+        check(
+            timestamps[i] == 0xffffe000LL + static_cast<std::int64_t>(i * 9000),
+            "frame PTS/reordering changed"
+        );
     }
 
     const rtsp::H264AccessUnit restarted{units[0], 0xffffe000U + 8 * 9000, true, true};
     check(decoder.decode(restarted) && decoder.drain(), "decoder could not reset after drain");
-    check(timestamps.size() == 9 && timestamps.back() == 72000, "reset restarted timestamp origin");
+    check(
+        timestamps.size() == 9 && timestamps.back() == 0xffffe000LL + 72000,
+        "reset restarted timestamp origin"
+    );
 }
 
 void test_corruption_and_recovery(const std::vector<std::string>& units) {

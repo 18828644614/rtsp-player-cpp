@@ -45,6 +45,14 @@ RtspClient::RtspClient(
     }
 }
 
+void RtspClient::set_play_handler(PlayHandler handler) {
+    play_handler_ = std::move(handler);
+}
+
+void RtspClient::set_sender_report_handler(SenderReportHandler handler) {
+    sender_report_handler_ = std::move(handler);
+}
+
 void RtspClient::set_video_handler(VideoHandler handler) {
     video_handler_ = std::move(handler);
 }
@@ -58,6 +66,7 @@ void RtspClient::set_audio_handlers(AudioConfigHandler on_config, AudioHandler o
 }
 
 void RtspClient::finish_media() {
+    sender_report_handler_ = {};  // 收尾阶段只统计 RTCP，不再触发播放回调。
     audio_active_ = false;
     if (video_active_) {
         video_.finish();
@@ -105,6 +114,9 @@ void RtspClient::run(const std::string& url) {
 
         request_and_wait("PLAY", aggregate_url_);
         play_started_ = Clock::now();
+        if (play_handler_) {
+            play_handler_();
+        }
         next_keepalive_ =
             *play_started_
             + std::chrono::milliseconds(static_cast<std::int64_t>(session_timeout_seconds_) * 500);
@@ -147,7 +159,7 @@ RtspMessage RtspClient::request_and_wait(
     request.uri = url;
     request.headers = headers;
     request.set_header("CSeq", std::to_string(++cseq_));
-    request.set_header("User-Agent", "rtsp-player-cpp/P3");
+    request.set_header("User-Agent", "rtsp-player-cpp/P5");
     if (!session_.empty()) {
         request.set_header("Session", session_);
     }
@@ -347,10 +359,16 @@ void RtspClient::dispatch_media(const RtspStreamItem& item) {
         if (rtp) {
             dispatch_rtp(track, item.payload);
         } else {
+            const auto previous_sr = track.stats.sr;
             try {
                 count_rtcp(track.stats, item.payload);
             } catch (const std::runtime_error& error) {
                 report_bad_packet(track, error);
+                return;
+            }
+            // 放在协议异常处理之外，回调失败必须交给会话收尾。
+            if (sender_report_handler_ && track.stats.sr != previous_sr) {
+                sender_report_handler_(track.media, *track.stats.latest_sr);
             }
         }
         return;

@@ -32,6 +32,8 @@ struct TrackState {
 // 单线程、一次会话、每次只等待一个 RTSP 响应。
 class RtspClient {
 public:
+    using PlayHandler = std::function<void()>;
+    using SenderReportHandler = std::function<void(const MediaTrack&, const SenderReport&)>;
     using VideoHandler = std::function<bool(const H264AccessUnit&)>;
     using AudioConfigHandler = std::function<void(const AacParameters&)>;
     using AudioHandler = std::function<void(const AacAccessUnit&)>;
@@ -39,6 +41,10 @@ public:
     RtspClient(
         ClientOptions options, std::ostream& output, std::function<bool()> stop_requested = {}
     );
+
+    // PLAY 成功及有效 SR 的同步通知；必须在 run 前设置。
+    void set_play_handler(PlayHandler handler);
+    void set_sender_report_handler(SenderReportHandler handler);
 
     // 同步回调；返回 false 要求丢弃后续依赖帧并等待 IDR。必须在 run 前设置。
     void set_video_handler(VideoHandler handler);
@@ -76,6 +82,8 @@ private:
     bool should_stop() const;
     void check_endpoint(const std::string& url) const;
 
+    PlayHandler play_handler_;
+    SenderReportHandler sender_report_handler_;
     ClientOptions options_;
     std::ostream& out_;
     std::function<bool()> stop_requested_;

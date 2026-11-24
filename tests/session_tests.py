@@ -17,8 +17,9 @@ def rtp(pt, source, sequence):
                        (sequence * 1024) & 0xffffffff, source) + b"payload$\x00"
 
 
-def rtcp(source, bye=False):
-    sr = struct.pack("!BBHIIIIII", 0x80, 200, 6, source, 4, 5, 6, 7, 8)
+def rtcp(source, bye=False, *, ntp=(4 << 32) | 5, timestamp=6):
+    sr = struct.pack("!BBHIIIIII", 0x80, 200, 6, source, ntp >> 32, ntp & 0xffffffff,
+                     timestamp & 0xffffffff, 7, 8)
     sdes = struct.pack("!BBHI", 0x81, 202, 2, source) + b"\x01\x01x\x00"
     return sr + sdes + (struct.pack("!BBHI", 0x81, 203, 1, source) if bye else b"")
 

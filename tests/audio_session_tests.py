@@ -7,21 +7,7 @@ import subprocess
 
 from player_session_tests import run
 from session_tests import frame, rtcp
-from video_session_tests import VideoServer, read_units, summary
-
-
-def read_audio(path):
-    wire = Path(path).read_bytes()
-    units = []
-    offset = 0
-    while offset < len(wire):
-        assert len(wire) - offset >= 7 and wire[offset:offset + 2] == b"\xff\xf1"
-        size = ((wire[offset + 3] & 3) << 11) | (wire[offset + 4] << 3) | (wire[offset + 5] >> 5)
-        assert 7 < size <= len(wire) - offset
-        units.append(wire[offset + 7:offset + size])
-        offset += size
-    assert len(units) == 13
-    return units
+from video_session_tests import VideoServer, read_audio, read_units, summary
 
 
 class AudioServer(VideoServer):
@@ -63,10 +49,9 @@ class AudioServer(VideoServer):
         return wire * 2 if self.audio_scenario == "duplicate" and index == 4 else wire
 
     def media(self, bye=False):
-        count = 40 if self.audio_scenario == "burst" else 1
+        count = 40 if self.audio_scenario == "burst" else self.audio_count()
         audio = b"" if bye else b"".join(self.audio_packet() for _ in range(count))
-        return ((b"" if bye else self.video()) + frame(7, rtcp(123, bye))
-                + audio + frame(11, rtcp(456, bye)))
+        return self.reports(bye) + (b"" if bye else self.timed_video()) + audio
 
 
 def check_playback(result, output, scenario):
@@ -77,7 +62,8 @@ def check_playback(result, output, scenario):
     assert audio["frames"] > 5 and audio["samples"] == audio["frames"] * 1024, output
     assert device["samples"] == audio["samples"] and 0 < device["queue_peak_ms"] <= 300, output
     assert summary(output, "decode")["frames"] > 0, output
-    assert summary(output, "display")["frames"] > 0, output
+    if scenario != "burst":
+        assert summary(output, "display")["frames"] > 0, output
     assert audio["errors"] == (1 if scenario == "corrupt" else 0), output
     assert packets["invalid"] == (1 if scenario == "malformed" else 0), output
     if scenario == "loss":

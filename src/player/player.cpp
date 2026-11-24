@@ -9,6 +9,7 @@ extern "C" {
 #include <libavutil/pixdesc.h>
 }
 
+#include <algorithm>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -66,15 +67,69 @@ void Player::enqueue_frame(const AVFrame& frame) {
     }
 }
 
-Player::Frame Player::take_due_frame(VideoClock::Time now) {
-    // 调用方持锁；FFmpeg 已重排 B 帧，此处仅从队首按 PTS 调度。
+void Player::update_sender_report(
+    const MediaTrack& track, const SenderReport& report, AudioOutput& audio_output
+) {
+    const auto kind =
+        track.media_type == "video" ? SyncClock::Track::Video : SyncClock::Track::Audio;
+    std::lock_guard<std::mutex> lock(mutex_);
+    const bool was_ready = clock_.ready();
+    if (clock_.update(kind, track.clock_rate, report)) {
+        dropped_ += frames_.size();
+        frames_.clear();
+        last_pts_.reset();
+        audio_output.clear();
+        sync_wait_started_ = std::chrono::steady_clock::now();
+        std::cout << "[SYNC] SR discontinuity; buffering again\n";
+    }
+    if (!was_ready && clock_.ready()) {
+        synchronized_ = true;
+        std::cout << "[SYNC] ready video_rate=90000 audio_rate=48000\n";
+    }
+}
+
+Player::Frame Player::take_due_frame(std::optional<std::int64_t> audio_pts) {
+    // 调用方持锁。FFmpeg 已重排 B 帧，音频位置耗尽后不会随本机时间前进。
     Frame due;
-    while (!frames_.empty() && clock_.deadline(frames_.front()->pts, now) <= now) {
+    const auto audio_us = audio_pts && clock_.ready()
+                              ? clock_.time(SyncClock::Track::Audio, *audio_pts)
+                              : std::nullopt;
+    if (!audio_us) {
+        if (done_) {
+            tail_dropped_ += frames_.size();
+            dropped_ += frames_.size();
+            frames_.clear();
+        }
+        return due;
+    }
+    while (!frames_.empty()) {
+        const auto video_us = *clock_.time(SyncClock::Track::Video, frames_.front()->pts);
+        const auto action = SyncClock::action(video_us, *audio_us);
+        if (action == SyncClock::Action::Wait) {
+            if (done_) {
+                // 音频已经有限排空，余下超出音频终点的视频不能继续等。
+                tail_dropped_ += frames_.size();
+                dropped_ += frames_.size();
+                frames_.clear();
+            }
+            break;
+        }
+        if (action == SyncClock::Action::Drop) {
+            frames_.pop_front();
+            ++dropped_;
+            ++late_dropped_;
+            continue;
+        }
         if (due) {
             ++dropped_;
         }
         due = std::move(frames_.front());
         frames_.pop_front();
+    }
+    if (due) {
+        const auto delta = *clock_.time(SyncClock::Track::Video, due->pts) - *audio_us;
+        const auto error = delta < 0 ? -delta : delta;
+        max_present_error_us_ = std::max(max_present_error_us_, error);
     }
     return due;
 }
@@ -86,11 +141,26 @@ void Player::decode_media(const std::string& url, AudioOutput& audio_output) {
         enqueue_frame(frame);
     });
     AudioDecoder audio_decoder([this, &audio_output](const AVFrame& frame) {
-        if (!should_stop()) {
-            audio_output.push(frame);
+        if (should_stop()) {
+            return;
         }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!clock_.ready()) {
+                waiting_audio_samples_ += frame.nb_samples;
+                return;
+            }
+        }
+        audio_output.push(frame);
     });
     RtspClient client(options_, std::cout, [this] { return should_stop(); });
+    client.set_play_handler([this] {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sync_wait_started_ = std::chrono::steady_clock::now();
+    });
+    client.set_sender_report_handler([this, &audio_output](
+                                         const MediaTrack& track, const SenderReport& report
+                                     ) { update_sender_report(track, report, audio_output); });
     client.set_video_handler([&decoder](const H264AccessUnit& au) {
         const bool decoded = decoder.decode(au);
         if (!decoded) {
@@ -151,7 +221,9 @@ void Player::decode_media(const std::string& url, AudioOutput& audio_output) {
     const auto& output_stats = audio_output.stats();
     std::cout << "[FINAL] audio_output samples=" << output_stats.samples
               << " queue_peak_ms=" << output_stats.queue_peak_ms
-              << " overflows=" << output_stats.overflows << std::endl;
+              << " overflows=" << output_stats.overflows
+              << " discontinuities=" << output_stats.discontinuities
+              << " underruns=" << output_stats.underruns << std::endl;
     if (failure) {
         std::rethrow_exception(failure);
     }
@@ -193,7 +265,14 @@ void Player::run(const std::string& url) {
                 if (failure_) {
                     break;
                 }
-                frame = take_due_frame(VideoClock::Clock::now());
+                if (!clock_.ready() && sync_wait_started_
+                    && (done_
+                        || std::chrono::steady_clock::now() - *sync_wait_started_
+                               >= std::chrono::seconds(3))) {
+                    throw std::runtime_error("cannot establish A/V sync: waiting for both RTCP SR");
+                }
+                // 锁顺序始终为 Player -> AudioOutput；音频内部从不回调 Player。
+                frame = take_due_frame(audio_output.playback_position());
                 finished = done_ && frames_.empty();
             }
 
@@ -219,6 +298,10 @@ void Player::run(const std::string& url) {
     frames_.clear();
     std::cout << "[FINAL] display frames=" << displayed << " dropped=" << dropped_
               << " queue_peak=" << queue_peak_ << " clock_resets=" << clock_.resets << std::endl;
+    std::cout << "[FINAL] sync ready=" << synchronized_ << " resets=" << clock_.resets
+              << " late_dropped=" << late_dropped_ << " tail_dropped=" << tail_dropped_
+              << " max_present_error_us=" << max_present_error_us_
+              << " waiting_audio_samples=" << waiting_audio_samples_ << std::endl;
     if (display_failure) {
         std::rethrow_exception(display_failure);
     }

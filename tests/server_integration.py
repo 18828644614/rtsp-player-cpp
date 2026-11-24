@@ -68,9 +68,16 @@ def main():
             device = re.search(r"\[FINAL\] audio_output samples=(\d+) queue_peak_ms=(\d+) overflows=(\d+)", output)
             assert aac and int(aac[1]) >= 100 and aac.groups()[1:] == ("0", "0", "0"), output
             assert audio and int(audio[1]) >= 100 and int(audio[2]) == int(audio[1]) * 1024 and audio[3] == "0", output
-            assert device and device[1] == audio[2] and 0 < int(device[2]) <= 300 and device[3] == "0", output
+            sync_match = re.search(r"\[FINAL\] sync (.+)", output)
+            assert sync_match, "missing P5 sync statistics"
+            sync = {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", sync_match[1])}
+            assert sync["ready"] == 1 and sync["resets"] == 0, output
+            assert sync["max_present_error_us"] <= 80000, output
+            assert device and int(device[1]) + sync["waiting_audio_samples"] == int(audio[2]), output
+            assert 0 < int(device[2]) <= 300 and device[3] == "0", output
             print(f"PASS: companion server, {len(frames)} video decoded, {display[1]} displayed, "
-                  f"{audio[1]} audio decoded, audio peak={device[2]} ms, clean TEARDOWN")
+                  f"{audio[1]} audio decoded, audio peak={device[2]} ms, "
+                  f"sync error<={sync['max_present_error_us']} us, clean TEARDOWN")
         finally:
             # 让短时入口自行结束，验证测试服务端也能正常收尾。
             try:

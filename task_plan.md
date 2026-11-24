@@ -13,9 +13,9 @@
 
 - [x] P1：实现一个 RTSP/TCP 会话，打印收到的两轨 RTP/RTCP 统计。不引入 FFmpeg、SDL3。
 - [x] P2：实现 H.264 拆包与访问单元重组，用 FFmpeg 在终端连续解帧。
-- [x] P3：用 SDL3 创建窗口，按视频自身时间戳P4：实现 AAC-hbr 拆包、AAC 解码和 SDL3 音频输出。显示，验证关闭和断线收尾。
-- [x] 
-- [ ] P5：基于 RTCP SR 对齐两轨，用估算的音频播放位置调度视频，验证端到端播放。
+- [x] P3：用 SDL3 创建窗口，按视频自身时间戳显示，验证关闭和断线收尾。
+- [x] P4：实现 AAC-hbr 拆包、AAC 解码和 SDL3 音频输出。
+- [x] P5：基于 RTCP SR 对齐两轨，用估算的音频播放位置调度视频，验证端到端播放。
 
 P1 阶段仅实现连接和协议统计；P2 在此基础上增加 FFmpeg 视频解码。
 
@@ -97,7 +97,7 @@ P3 验收时状态：窗口播放已完成；音频输出与跨轨同步留到�
 - [x] 接入双轨回调，验证关闭、断线、设备失败和资源释放。
 - [x] 完成 Debug / Release 回归、配套服务端联调及文档更新。
 
-当前状态：P4 已实现。视频继续使用自身 PTS；RTCP SR 对齐与音频播放时钟留到 P5。
+P4 验收时状态：音频输出已实现，视频仍使用自身 PTS；后续 P5 进展见下文。
 
 ### P4 验收结果
 
@@ -110,3 +110,28 @@ P3 验收时状态：窗口播放已完成；音频输出与跨轨同步留到�
 - 两次联调均两轨 RTP bad=0、unknown_channels=0、TEARDOWN=200，视频显示无丢帧。日志保存在忽略目录 build/p4-server-integration-debug.log 和 build/p4-server-integration-release.log。
 - Release dumpbin 直接依赖仍为 avcodec-63.dll、avutil-61.dll、SDL3.dll、Winsock 和系统/MSVC 运行库，没有新增 swresample、swscale 或 avformat。未修改配套服务端源码。
 - 本次验证合成音频的解码和实际设备流输出；未进行人工听音、实体摄像头/麦克风采集或音视频同步验收。
+
+## P5 实施进度（2026-11-24）
+
+目标：保持主线程与一个接收解码线程，用两轨 SR 和估算音频位置调度视频，只增加小型同步时钟结构体。
+
+- [x] 统一视频 RTP PTS 语义，接入有效 SR 回调和公共时间映射。
+- [x] 扩展 AudioOutput 播放位置、缓冲不连续及线程保护。
+- [x] 接入 Player 等待 SR、音频主时钟和有限收尾。
+- [x] 更新回环媒体时间，补齐同步边界测试并运行 Debug / Release 回归。
+- [x] 完成配套服务端联调，更新设计、使用说明和验收记录。
+
+当前状态：P5 代码与自动化验收已完成。真实窗口/音频设备端到端播放已联调，物理声画误差尚未进行人工拍手或采集回录测量。
+
+### P5 验收结果
+
+- MSVC x64 Debug / Release 构建成功，无编译警告；CTest 各 15/15 通过，最终完整测试分别耗时约 49 / 48 秒。clang-format --dry-run --Werror 与 git diff --check 通过。
+- 保留 P4 各项协议、拆包、解码、渲染、取消和故障恢复回归；新增 sync_clock、sync_session。媒体回环按 PTS 时长发送并预送 B 帧，不再以等包数代替等媒体时长。
+- 确定性测试验证两轨首样本相差 120 ms、两轨 SR 不同时刻/不同先后顺序、RTP 回绕、后续 SR 更新、重复/过期 SR、映射跳变和视频等帧/丢帧阈值。
+- 实际 TCP 双轨测试验证 120 ms 偏移、延迟 SR、缺一轨 SR 约 3 秒报错、SR 跳变后重新同步、坏复合 RTCP 不提交、音频先结束的有限收尾，以及无 SR 的 RTCP 不重放回调、SR 回调异常正确传播。
+- AudioOutput 测试验证带 PTS 的 PCM 输出、300 ms 上限、位置处于已提交样本范围、排空保留终点、空队列不外推、PTS 缺口重建、clear 使位置失效，以及设备失败和主动取消。
+- 配套 camera_rtsp_tests.exe --serve 与真实 SDL 窗口/默认音频设备四秒联调：Debug 解码/显示 76/76 帧，AAC 181 帧，音频输入峰值 78 ms，最大呈现调度差值 9814 us；Release 解码/显示 77/77 帧，AAC 180 帧，峰值 76 ms，差值 9958 us。
+- 两次联调均 SR 映射建立、sync resets=0、音频 overflows/discontinuities/underruns=0，两轨 bad=0、AAC invalid/lost/dropped=0、解码 errors=0、unknown_channels=0、TEARDOWN=200。各丢弃 1024 个等待首组 SR 的音频样本，日志独立统计。
+- 成功日志位于忽略目录 build/p5-server-integration-debug-retry.log、build/p5-server-integration-release.log；首次提前结束、未满足样本数断言的 Debug 日志保留于 build/p5-server-integration-debug.log，未降低验收下限。
+- Release dumpbin 直接依赖仍为 avcodec-63.dll、avutil-61.dll、SDL3.dll、Winsock 和系统/MSVC 运行库；没有新增 avformat、swresample 或 swscale。未修改配套服务端。
+- 差值反映播放器调度与 SDL 输入消费位置的关系，未补偿设备缓冲；未进行实体摄像头/麦克风拍手或采集回录，不能将约 10 ms 调度差值解释为物理声画误差。

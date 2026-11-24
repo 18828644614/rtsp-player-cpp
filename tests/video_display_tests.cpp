@@ -1,4 +1,3 @@
-#include "player/video_clock.h"
 #include "player/video_renderer.h"
 
 #include <SDL3/SDL.h>
@@ -20,31 +19,6 @@ void check(bool value, const char* message) {
     if (!value) {
         throw std::runtime_error(message);
     }
-}
-
-void test_clock() {
-    using namespace std::chrono;
-    rtsp::VideoClock clock;
-    const auto start = rtsp::VideoClock::Time{} + seconds(10);
-    check(clock.deadline(72000, start) == start, "first displayed frame must anchor clock");
-    check(clock.deadline(76500, start) == start + milliseconds(50), "90kHz PTS conversion failed");
-    check(
-        clock.deadline(76500, start + milliseconds(20)) == start + milliseconds(50),
-        "arrival/poll time changed video deadline"
-    );
-    check(
-        clock.deadline(81000, start + milliseconds(150)) < start + milliseconds(150),
-        "late frame should already be due"
-    );
-    check(
-        clock.deadline(900000, start + seconds(1)) == start + seconds(1),
-        "large timestamp jump did not reanchor"
-    );
-    check(clock.resets == 1, "unexpected timestamp reset count");
-    check(
-        clock.deadline(0, start + seconds(2)) == start + seconds(2),
-        "backward timestamp did not reanchor"
-    );
 }
 
 void free_frame(AVFrame* frame) {
@@ -169,9 +143,8 @@ void test_renderer(const char* snapshot) {
 
 int main(int argc, char* argv[]) {
     try {
-        test_clock();
         test_renderer(argc > 1 ? argv[1] : nullptr);
-        std::cout << "PASS: PTS deadlines, YUV pixels, letterbox, resize, SAR and close event\n";
+        std::cout << "PASS: YUV pixels, letterbox, resize, SAR and close event\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << ": " << SDL_GetError() << '\n';

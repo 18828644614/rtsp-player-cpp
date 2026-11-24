@@ -1,9 +1,10 @@
 #pragma once
 
-#include "player/video_clock.h"
+#include "player/sync_clock.h"
 #include "rtsp/rtsp_client.h"
 
 #include <atomic>
+#include <chrono>
 #include <deque>
 #include <exception>
 #include <functional>
@@ -34,20 +35,29 @@ private:
     void receive_media(const std::string& url, AudioOutput& audio_output);
     void decode_media(const std::string& url, AudioOutput& audio_output);
     void enqueue_frame(const AVFrame& frame);
-    Frame take_due_frame(VideoClock::Time now);
+    void update_sender_report(
+        const MediaTrack& track, const SenderReport& report, AudioOutput& audio_output
+    );
+    Frame take_due_frame(std::optional<std::int64_t> audio_pts);
     bool should_stop() const;
 
     ClientOptions options_;
     std::function<bool()> external_stop_;
     std::atomic<bool> stop_{false};
     std::mutex mutex_;
-    std::deque<Frame> frames_;  // 持锁仅做入队/出队，不在锁内解码或绘制。
+    std::deque<Frame> frames_;  // mutex_ 保护队列、同步映射与结束状态；锁内不解码或绘制。
     bool done_ = false;
     std::exception_ptr failure_;
     std::optional<std::int64_t> last_pts_;
     std::uint64_t dropped_ = 0;
     std::uint64_t queue_peak_ = 0;
-    VideoClock clock_;  // 仅主线程使用。
+    SyncClock clock_;  // 与帧队列共用 mutex_。
+    std::optional<std::chrono::steady_clock::time_point> sync_wait_started_;
+    bool synchronized_ = false;
+    std::uint64_t waiting_audio_samples_ = 0;
+    std::uint64_t late_dropped_ = 0;
+    std::uint64_t tail_dropped_ = 0;
+    std::int64_t max_present_error_us_ = 0;
 };
 
 }  // namespace rtsp

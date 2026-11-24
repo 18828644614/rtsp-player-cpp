@@ -21,6 +21,25 @@ int main(int argc, char* argv[]) {
         if (argc != 4) {
             throw std::runtime_error("expected URL, delay-ms, event|stop");
         }
+        const std::string action = argv[3];
+        if (action == "sr-throw" || action == "sr-count") {
+            rtsp::ClientOptions options;
+            options.seconds = 1;
+            rtsp::RtspClient client(options, std::cout);
+            int reports = 0;
+            bool playing = false;
+            client.set_play_handler([&] { playing = true; });
+            client.set_sender_report_handler([&](const rtsp::MediaTrack&,
+                                                 const rtsp::SenderReport&) {
+                ++reports;
+                if (action == "sr-throw" && playing) {
+                    throw std::runtime_error("test SR handler failure");
+                }
+            });
+            client.run(argv[1]);
+            std::cout << "[TEST] reports=" << reports << '\n';
+            return 0;
+        }
         const auto delay = std::chrono::milliseconds(std::stoi(argv[2]));
         const auto started = std::chrono::steady_clock::now();
         const bool event = std::string(argv[3]) == "event";

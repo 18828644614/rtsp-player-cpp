@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import struct
 import subprocess
+import time
 
 from session_tests import Server, frame, rtp, rtcp
 
@@ -30,6 +31,20 @@ def read_units(path):
     return units
 
 
+def read_audio(path):
+    wire = Path(path).read_bytes()
+    units = []
+    offset = 0
+    while offset < len(wire):
+        assert len(wire) - offset >= 7 and wire[offset:offset + 2] == b"\xff\xf1"
+        size = ((wire[offset + 3] & 3) << 11) | (wire[offset + 4] << 3) | (wire[offset + 5] >> 5)
+        assert 7 < size <= len(wire) - offset
+        units.append(wire[offset + 7:offset + size])
+        offset += size
+    assert len(units) == 13
+    return units
+
+
 def packetize(nalu, limit=16):
     if len(nalu) <= limit:
         return [nalu]
@@ -46,6 +61,9 @@ class VideoServer(Server):
         super().__init__("video")
         self.units = units
         self.scenario = scenario
+        self.audio = read_audio(Path(__file__).parent / "data" / "audio_48k_mono.aac")
+        self.audio_index = 0
+        self.started = None
         self.video_index = 0
         self.video_sequence = 65530
         self.injected = False
@@ -94,11 +112,39 @@ class VideoServer(Server):
             output.extend(frame(6, packet))
         return bytes(output)
 
+    def elapsed(self):
+        if self.started is None:
+            self.started = time.monotonic()
+        return time.monotonic() - self.started
+
+    def timed_video(self):
+        # 提前解码 B 帧；消费侧仍按 PTS 调度。首个有效 IDR 为第 4 个 AU。
+        target = min(24, int(self.elapsed() * 10) + 6)
+        return b"".join(self.video() for _ in range(target - self.video_index))
+
+    def audio_count(self):
+        # 保留约 64 ms 音频输入，测试正常节奏，不依赖快发触发重定位。
+        target = int(self.elapsed() * 48000 / 1024) + 3
+        return max(0, target - self.audio_index)
+
+    def audio_packet(self):
+        index = self.audio_index
+        self.audio_index += 1
+        data = self.audio[index % len(self.audio)]
+        payload = b"\0\x10" + struct.pack("!H", len(data) << 3) + data
+        packet = struct.pack("!BBHII", 0x80, 0x80 | 111, (65530 + index) & 65535,
+                             (0xfffffc00 + index * 1024) & 0xffffffff, 456) + payload
+        return frame(10, packet)
+
+    def reports(self, bye=False):
+        # 两个随机 RTP 起点表示同一媒体时刻；锚点跨回绕仍有效。
+        return (frame(7, rtcp(123, bye, ntp=1000 << 32, timestamp=0xffffe000))
+                + frame(11, rtcp(456, bye, ntp=1000 << 32, timestamp=0xfffffc00)))
+
     def media(self, bye=False):
-        self.sequence += 1
-        video = b"" if bye else self.video()
-        return (video + frame(7, rtcp(123, bye))
-                + frame(10, rtp(111, 456, self.sequence)) + frame(11, rtcp(456, bye)))
+        video = b"" if bye else self.timed_video()
+        audio = b"" if bye else b"".join(self.audio_packet() for _ in range(self.audio_count()))
+        return self.reports(bye) + video + audio
 
 
 def summary(output, kind):
@@ -111,7 +157,8 @@ def run_case(player, units, scenario):
     server = VideoServer(units, scenario)
     server.thread.start()
     try:
-        result = subprocess.run([player, server.url, "--seconds", "2", "--timeout-ms", "1000"],
+        seconds = "3" if scenario == "eof" else "2"
+        result = subprocess.run([player, server.url, "--seconds", seconds, "--timeout-ms", "1000"],
                                 capture_output=True, text=True, timeout=6)
     finally:
         server.stop.set()
@@ -126,7 +173,8 @@ def run_case(player, units, scenario):
                           for _, _, w, h, fmt in frames), output
     timestamps = [int(pts) for _, pts, _, _, _ in frames]
     assert all(a < b for a, b in zip(timestamps, timestamps[1:])), output
-    assert 72000 in timestamps and timestamps[-1] == 171000, f"IDR recovery/final drain failed\n{output}"
+    start = (0xffffe000 + 36000) & 0xffffffff  # 初始等待 IDR 后首次送入解码器的 RTP 起点。
+    assert start + 72000 in timestamps and timestamps[-1] == start + 171000, f"IDR recovery/final drain failed\n{output}"
     decode = summary(output, "decode")
     h264 = summary(output, "h264")
     assert decode["frames"] == len(frames) and h264["au"] >= len(frames), output

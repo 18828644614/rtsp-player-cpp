@@ -26,6 +26,7 @@ void check(bool value, const char* message) {
 void test_output() {
     rtsp::AudioOutput output;
     check(output.queued_ms() == 0, "new audio output is not empty");
+    check(!output.playback_position(), "new audio output has a playback position");
     std::vector<float> samples(1024, 0.1f);
     AVFrame frame{};
     frame.sample_rate = 48000;
@@ -34,6 +35,7 @@ void test_output() {
     av_channel_layout_default(&frame.ch_layout, 1);
     frame.data[0] = reinterpret_cast<std::uint8_t*>(samples.data());
     for (int i = 0; i < 1000; ++i) {
+        frame.pts = static_cast<std::int64_t>(i) * 1024;
         output.push(frame);
         check(output.queued_ms() <= 300, "audio input queue exceeded 300 ms");
     }
@@ -46,8 +48,15 @@ void test_output() {
     std::fill(samples.begin(), samples.end(), 0.0f);
     output.clear();
     check(output.queued_ms() == 0, "audio clear failed");
+    check(!output.playback_position(), "clear retained old audio position");
     frame.format = AV_SAMPLE_FMT_FLT;
+    frame.pts = 5000000;
     output.push(frame);
+    const auto position = output.playback_position();
+    check(
+        position && *position >= frame.pts && *position <= frame.pts + 1024,
+        "audio position lies outside submitted PCM"
+    );
     const auto started = std::chrono::steady_clock::now();
     output.drain([] { return false; });
     check(output.queued_ms() == 0, "normal audio drain left input data");
@@ -55,7 +64,18 @@ void test_output() {
         std::chrono::steady_clock::now() - started < std::chrono::seconds(1),
         "audio drain exceeded its deadline"
     );
+    const auto final_position = output.playback_position();
+    check(final_position && *final_position == frame.pts + 1024, "drain lost final audio position");
+    SDL_Delay(40);
+    check(output.playback_position() == final_position, "underrun advanced audio past PCM end");
+    frame.pts += 48000;  // 模拟解码失败/丢包后恢复，旧段不能跨缺口估算。
     output.push(frame);
+    const auto resumed = output.playback_position();
+    check(
+        resumed && *resumed >= frame.pts && *resumed <= frame.pts + 1024,
+        "PTS gap reused old segment position"
+    );
+    check(output.stats().discontinuities > 0, "PCM discontinuity was not counted");
     const auto cancelled = std::chrono::steady_clock::now();
     output.drain([] { return true; });
     check(

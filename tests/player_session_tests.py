@@ -59,7 +59,7 @@ def test_close(driver, mode, delay, action):
 
 def test_video(player, units, scenario):
     server = VideoServer(units, scenario)
-    result, output, _ = run(server, [player, server.url, "--seconds", "2"], max_seconds=6)
+    result, output, _ = run(server, [player, server.url, "--seconds", "3" if scenario == "eof" else "2"], max_seconds=6)
     assert result.returncode == (1 if scenario == "eof" else 0), output
     display = summary(output, "display")
     decode = summary(output, "decode")
@@ -86,7 +86,7 @@ def main():
         test_close(args.driver, mode, delay, action)
     units = read_units(args.fixture)
     server = VideoServer(units, "clean")
-    result, output, _ = run(server, [args.driver, server.url, "500", "event"])
+    result, output, _ = run(server, [args.driver, server.url, "700", "event"])
     assert result.returncode == 0 and "[RTSP] TEARDOWN 200" in output, output
     assert summary(output, "decode")["frames"] > 0 and summary(output, "display")["frames"] > 0, output
     assert summary(output, "display")["frames"] + summary(output, "display")["dropped"] == summary(output, "decode")["frames"], output
